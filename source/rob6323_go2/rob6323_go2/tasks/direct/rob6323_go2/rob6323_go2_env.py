@@ -56,6 +56,12 @@ class Rob6323Go2Env(DirectRLEnv):
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
 
+		# PD control parameters
+		self.Kp = torch.tensor([cfg.Kp] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+		self.Kd = torch.tensor([cfg.Kd] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
+		self.motor_offsets = torch.zeros(self.num_envs, 12, device=self.device)
+		self.torque_limits = cfg.torque_limits
+
 	#variables needed for action rate penalization
 	#shape: (num_evs, action_dim, history_length)
 	self.last_actions = torch.zeros(self.num_evs, gym.spaces.flatdim(self.single_action_space), 3, dtype=torch.float, device=self.device, requires_grad=False)
@@ -80,9 +86,25 @@ class Rob6323Go2Env(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self._actions = actions.clone()
-        self._processed_actions = self.cfg.action_scale * self._actions + self.robot.data.default_joint_pos
+            # Compute desired joint positions from policy actions
+	    self.desired_joint_pos = (
+	        self.cfg.action_scale * self._actions 
+	        + self.robot.data.default_joint_pos
+	    )
 
     def _apply_action(self) -> None:
+		    # Compute PD torques
+	    torques = torch.clip(
+	        (
+	            self.Kp * (
+	                self.desired_joint_pos 
+	                - self.robot.data.joint_pos 
+	            )
+	            - self.Kd * self.robot.data.joint_vel
+	        ),
+	        -self.torque_limits,
+	        self.torque_limits,
+	    )
         self.robot.set_joint_position_target(self._processed_actions)
 
     def _get_observations(self) -> dict:
