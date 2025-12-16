@@ -69,3 +69,8 @@ tests/
 
 # Docker history
 .isaac-lab-docker-history
+
+# Local artifacts
+baseline_outputs/
+logs/
+**/*.mp4
