@@ -125,7 +125,8 @@ class Rob6323Go2Env(DirectRLEnv):
 	        -self.torque_limits,
 	        self.torque_limits,
 	    )
-        self.robot.set_joint_position_target(self._processed_actions)
+        # Apply torques to the robot
+    	self.robot.set_joint_effort_target(torques)
 
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
