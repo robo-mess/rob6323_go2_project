@@ -31,6 +31,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     observation_space = 48
     state_space = 0
     debug_vis = True
+    base_height_min = 0.20  # Terminate if base is lower than 20cm
 
     # PD control gains
     Kp = 20.0  # Proportional gain
