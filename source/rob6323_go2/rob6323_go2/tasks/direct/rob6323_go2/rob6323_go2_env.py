@@ -47,6 +47,15 @@ class Rob6323Go2Env(DirectRLEnv):
 		        "track_ang_vel_z_exp",
 		        "rew_action_rate",     # <--- Added
 		        "raibert_heuristic"    # <--- Added
+
+                # Part 5
+                "orient", "lin_vel_z", "dof_vel", "ang_vel_xy",
+
+                # Part 6
+                "feet_clearance", "tracking_contacts_shaped_force",
+
+                # rubric extras
+                "base_height", "non_foot_contact", "torque",
 		    ]
 		}
         # Get specific body indices
@@ -73,6 +82,30 @@ class Rob6323Go2Env(DirectRLEnv):
         for name in foot_names:
             id_list, _ = self.robot.find_bodies(name)
             self._feet_ids.append(id_list[0])
+
+        # --- feet indices in CONTACT SENSOR (for forces) ---
+        self._feet_ids_sensor = []
+        foot_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+        for name in foot_names:
+            id_list, _ = self._contact_sensor.find_bodies(name)
+            self._feet_ids_sensor.append(int(id_list[0]))
+
+        # --- undesired contacts (knees/hips/thigh/calf touching ground) ---
+        undesired = []
+        for pat in [".*thigh", ".*calf", ".*hip"]:
+            ids, _ = self._contact_sensor.find_bodies(pat)
+            undesired += [int(i) for i in ids]
+
+        # remove feet from undesired list
+        feet_set = set(self._feet_ids_sensor)
+        self._undesired_contact_ids_sensor = torch.tensor(
+            [i for i in sorted(set(undesired)) if i not in feet_set],
+            device=self.device,
+            dtype=torch.long,
+        )
+
+        # store last torques for torque penalty
+        self._last_torques = torch.zeros(self.num_envs, 12, device=self.device)
 
         # Variables needed for the raibert heuristic
         self.gait_indices = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
@@ -127,6 +160,7 @@ class Rob6323Go2Env(DirectRLEnv):
             self.torque_limits,
         )
         # Apply torques to the robot
+        self._last_torques = torques
         self.robot.set_joint_effort_target(torques)
 
     def _get_observations(self) -> dict:
@@ -153,39 +187,111 @@ class Rob6323Go2Env(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
-        # linear velocity tracking
+        # ----------------------------
+        # existing tracking rewards
+        # ----------------------------
         lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self.robot.data.root_lin_vel_b[:, :2]), dim=1)
         lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
-        # yaw rate tracking
+
         yaw_rate_error = torch.square(self._commands[:, 2] - self.robot.data.root_ang_vel_b[:, 2])
         yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.25)
 
-        # action rate penalization
-        # First derivative (Current - Last)
+        # action rate penalization (already in your code)
         rew_action_rate = torch.sum(torch.square(self._actions - self.last_actions[:, :, 0]), dim=1) * (self.cfg.action_scale ** 2)
-        # Second derivative (Current - 2*Last + 2ndLast)
         rew_action_rate += torch.sum(torch.square(self._actions - 2 * self.last_actions[:, :, 0] + self.last_actions[:, :, 1]), dim=1) * (self.cfg.action_scale ** 2)
 
-        # Update the prev action hist (roll buffer and insert new action)
         self.last_actions = torch.roll(self.last_actions, 1, 2)
         self.last_actions[:, :, 0] = self._actions[:]
 
-        
         rew_raibert_heuristic = self._reward_raibert_heuristic()
 
-        # Add to rewards dict
+        # ============================================================
+        # Problem 1 + Problem 2: Part 5 stability (upright + smooth base)
+        # ============================================================
+        pg = self.robot.data.projected_gravity_b          # (N,3)
+        lin = self.robot.data.root_lin_vel_b              # (N,3)
+        ang = self.robot.data.root_ang_vel_b              # (N,3)
+        qd  = self.robot.data.joint_vel                   # (N,12)
+
+        rew_orient     = (pg[:, 0]**2 + pg[:, 1]**2)
+        rew_lin_vel_z  = (lin[:, 2]**2)
+        rew_dof_vel    = (qd**2).sum(dim=1)
+        rew_ang_vel_xy = (ang[:, 0]**2 + ang[:, 1]**2)
+
+        # ============================================================
+        # Problem 1: Part 6 foot clearance + contact shaping (gait quality)
+        # You already generate desired_contact_states in _step_contact_targets(). :contentReference[oaicite:7]{index=7}
+        # ============================================================
+        foot_pos_w = self.foot_positions_w                # (N,4,3)
+        foot_h = foot_pos_w[:, :, 2]                      # (N,4)
+
+        # swing weight: 1 in swing, 0 in stance (soft)
+        swing_w = 1.0 - self.desired_contact_states       # (N,4)
+
+        # clearance penalty (penalize feet that fail to lift during swing)
+        clearance = self.cfg.feet_clearance_target_m
+        err = torch.clamp(clearance - foot_h, min=0.0)
+        rew_feet_clearance = (swing_w * (err**2)).sum(dim=1)
+
+        # contact force tracking: stance wants contact, swing wants no contact
+        forces_w = self._contact_sensor.data.net_forces_w[:, self._feet_ids_sensor, :]  # (N,4,3)
+        fmag = torch.linalg.norm(forces_w, dim=-1)                                       # (N,4)
+        contact_strength = torch.tanh(fmag / self.cfg.contact_force_scale)               # (N,4) in [0,1)
+
+        match = 1.0 - torch.abs(contact_strength - self.desired_contact_states)         # (N,4)
+        rew_track_contacts = match.mean(dim=1)                                           # (N,)
+
+        # ============================================================
+        # Problem 2: nominal base height + avoid knee/hip ground hits
+        # ============================================================
+        base_h = self.robot.data.root_pos_w[:, 2]
+        rew_base_height = (base_h - self.cfg.base_height_target_m) ** 2
+
+        if self._undesired_contact_ids_sensor.numel() > 0:
+            bad_forces = self._contact_sensor.data.net_forces_w[:, self._undesired_contact_ids_sensor, :]  # (N,K,3)
+            bad_mag = torch.linalg.norm(bad_forces, dim=-1).sum(dim=1)                                      # (N,)
+            rew_non_foot_contact = torch.tanh(bad_mag / self.cfg.contact_force_scale)
+        else:
+            rew_non_foot_contact = torch.zeros(self.num_envs, device=self.device)
+
+        # ============================================================
+        # Problem 3: torque magnitude regularization (rubric)
+        # ============================================================
+        tau = self._last_torques
+        rew_torque = ((tau / self.torque_limits) ** 2).sum(dim=1)
+
+        # ----------------------------
+        # final rewards dict
+        # ----------------------------
         rewards = {
-            "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale, # Removed step_dt
-            "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale, # Removed step_dt
+            "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale,
+            "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale,
             "rew_action_rate": rew_action_rate * self.cfg.action_rate_reward_scale,
             "raibert_heuristic": rew_raibert_heuristic * self.cfg.raibert_heuristic_reward_scale,
 
+            # Part 5
+            "orient": rew_orient * self.cfg.orient_reward_scale,
+            "lin_vel_z": rew_lin_vel_z * self.cfg.lin_vel_z_reward_scale,
+            "dof_vel": rew_dof_vel * self.cfg.dof_vel_reward_scale,
+            "ang_vel_xy": rew_ang_vel_xy * self.cfg.ang_vel_xy_reward_scale,
+
+            # Part 6
+            "feet_clearance": rew_feet_clearance * self.cfg.feet_clearance_reward_scale,
+            "tracking_contacts_shaped_force": rew_track_contacts * self.cfg.tracking_contacts_shaped_force_reward_scale,
+
+            # rubric extras
+            "base_height": rew_base_height * self.cfg.base_height_reward_scale,
+            "non_foot_contact": rew_non_foot_contact * self.cfg.non_foot_contact_reward_scale,
+            "torque": rew_torque * self.cfg.torque_reward_scale,
         }
+
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
-        # Logging
+
         for key, value in rewards.items():
             self._episode_sums[key] += value
+
         return reward
+
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         base_height = self.robot.data.root_pos_w[:, 2]
