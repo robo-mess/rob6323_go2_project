@@ -31,7 +31,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     observation_space = 48 + 4  # Added 4 for clock inputs
     state_space = 0
     debug_vis = True
-    base_height_min = 0.20  # Terminate if base is lower than 20cm
+    base_height_min = 0.05  # Terminate if base is lower than 20cm
 
     raibert_heuristic_reward_scale = -10.0
     feet_clearance_reward_scale = -30.0
