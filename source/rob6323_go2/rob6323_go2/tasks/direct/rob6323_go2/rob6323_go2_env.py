@@ -60,6 +60,7 @@ class Rob6323Go2Env(DirectRLEnv):
 		}
         # Get specific body indices
         self._base_id, _ = self._contact_sensor.find_bodies("base")
+        self._base_id = int(self._base_id[0])
         # self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
         # self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(".*thigh")
 
@@ -81,7 +82,7 @@ class Rob6323Go2Env(DirectRLEnv):
         foot_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
         for name in foot_names:
             id_list, _ = self.robot.find_bodies(name)
-            self._feet_ids.append(id_list[0])
+            self._feet_ids.append(int(id_list[0]))
 
         # --- feet indices in CONTACT SENSOR (for forces) ---
         self._feet_ids_sensor = []
