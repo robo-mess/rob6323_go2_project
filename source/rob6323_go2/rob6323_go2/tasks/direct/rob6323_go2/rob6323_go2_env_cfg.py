@@ -101,3 +101,21 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = 1.0
     yaw_rate_reward_scale = 0.5
     action_rate_reward_scale = -0.1
+
+        # --- Part 5: base stability penalties ---
+    orient_reward_scale     = -5.0
+    lin_vel_z_reward_scale  = -0.02
+    dof_vel_reward_scale    = -0.0001
+    ang_vel_xy_reward_scale = -0.001
+
+    # --- Part 6: foot interaction constants (scales already exist in your cfg) ---
+    feet_clearance_target_m = 0.08     # 6–10 cm is typical
+    contact_force_scale     = 50.0     # for tanh shaping
+
+    # --- Base height + collision avoidance (rubric) ---
+    base_height_target_m        = 0.32
+    base_height_reward_scale    = -20.0
+    non_foot_contact_reward_scale = -2.0  # penalize knees/hips hitting ground
+
+    # --- Action regularization (rubric asks torque penalty ~1e-4 or smaller) ---
+    torque_reward_scale = -1.0e-4
