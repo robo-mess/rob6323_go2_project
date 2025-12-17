@@ -299,13 +299,31 @@ class Rob6323Go2Env(DirectRLEnv):
         base_height = self.robot.data.root_pos_w[:, 2]
         cstr_base_height_min = base_height < self.cfg.base_height_min
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        net_contact_forces = self._contact_sensor.data.net_forces_w_history  # (N,H,B,3)
 
-        base_id = int(self._base_id[0]) if isinstance(self._base_id, (list, tuple, torch.Tensor)) else int(self._base_id)
+        # --- get scalar base id safely ---
+        if isinstance(self._base_id, torch.Tensor):
+            base_id = int(self._base_id.flatten()[0].item())
+        elif isinstance(self._base_id, (list, tuple)):
+            base_id = int(self._base_id[0])
+        else:
+            base_id = int(self._base_id)
 
-        base_force_mag_hist = torch.linalg.norm(net_contact_forces[:, :, base_id, :], dim=-1)  # (N,H)
-        cstr_termination_contacts = torch.any(base_force_mag_hist > 1.0, dim=1)
+        # --- contact termination: support both history and non-history tensors ---
+        forces_hist = getattr(self._contact_sensor.data, "net_forces_w_history", None)
+
+        if forces_hist is not None and forces_hist.ndim == 4:
+            # (N, H, B, 3)
+            base_force_mag_hist = torch.linalg.norm(forces_hist[:, :, base_id, :], dim=-1)  # (N,H)
+            cstr_termination_contacts = torch.any(base_force_mag_hist > 1.0, dim=1)         # (N,)
+        else:
+            # fallback: (N, B, 3)
+            forces = self._contact_sensor.data.net_forces_w
+            base_force_mag = torch.linalg.norm(forces[:, base_id, :], dim=-1)               # (N,)
+            cstr_termination_contacts = base_force_mag > 1.0
+
+        # upside-down check (keep as you had it)
         cstr_upsidedown = self.robot.data.projected_gravity_b[:, 2] > 0
+
         died = cstr_termination_contacts | cstr_upsidedown | cstr_base_height_min
         return died, time_out
 
