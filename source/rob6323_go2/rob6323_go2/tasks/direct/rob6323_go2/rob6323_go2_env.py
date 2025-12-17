@@ -122,7 +122,8 @@ class Rob6323Go2Env(DirectRLEnv):
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
-        self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
+        self.scene.articulations["robot"] = self.robot
+        self.scene.sensors["contact_sensor"] = self._contact_sensor
         # add ground plane
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -297,8 +298,12 @@ class Rob6323Go2Env(DirectRLEnv):
         base_height = self.robot.data.root_pos_w[:, 2]
         cstr_base_height_min = base_height < self.cfg.base_height_min
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        net_contact_forces = self._contact_sensor.data.net_forces_w_history
-        cstr_termination_contacts = torch.any(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=1)[0] > 1.0, dim=1)
+        net_contact_forces = self._contact_sensor.data.net_forces_w_history  # (N,H,B,3)
+
+        base_id = int(self._base_id[0]) if isinstance(self._base_id, (list, tuple, torch.Tensor)) else int(self._base_id)
+
+        base_force_mag_hist = torch.linalg.norm(net_contact_forces[:, :, base_id, :], dim=-1)  # (N,H)
+        cstr_termination_contacts = torch.any(base_force_mag_hist > 1.0, dim=1)
         cstr_upsidedown = self.robot.data.projected_gravity_b[:, 2] > 0
         died = cstr_termination_contacts | cstr_upsidedown | cstr_base_height_min
         return died, time_out
