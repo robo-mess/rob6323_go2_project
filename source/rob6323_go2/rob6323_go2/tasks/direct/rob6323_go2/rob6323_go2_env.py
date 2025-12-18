@@ -8,6 +8,7 @@ from __future__ import annotations
 import gymnasium as gym
 import numpy as np
 import torch
+import math
 from collections.abc import Sequence
 
 import isaaclab.sim as sim_utils
@@ -18,7 +19,6 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import sample_uniform
 import isaaclab.utils.math as math_utils
 
-# NEW: height scanner sensor
 from isaaclab.sensors.ray_caster import RayCaster
 
 from .rob6323_go2_env_cfg import Rob6323Go2EnvCfg
@@ -109,6 +109,9 @@ class Rob6323Go2Env(DirectRLEnv):
         self.clock_inputs = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
         self.desired_contact_states = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
 
+        # IMPORTANT FIX: foot_indices is used in rewards (raibert) — must exist before first reward call
+        self.foot_indices = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
+
         # height scan obs buffer
         self._height_scan_obs = torch.zeros(self.num_envs, self.cfg.height_scan_num_rays, device=self.device)
 
@@ -128,8 +131,19 @@ class Rob6323Go2Env(DirectRLEnv):
         self.scene.sensors["contact_sensor"] = self._contact_sensor
         self.scene.sensors["height_scanner"] = self._height_scanner
 
+        # terrain env settings
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
+
+        # IMPORTANT FIX: if num_envs is large and generator grid is 1x1, all envs share same origin -> crash
+        gen = getattr(self.cfg.terrain, "terrain_generator", None)
+        if gen is not None and getattr(gen, "num_rows", 1) == 1 and getattr(gen, "num_cols", 1) == 1:
+            n = int(self.scene.cfg.num_envs)
+            rows = int(math.ceil(math.sqrt(n)))
+            cols = int(math.ceil(n / rows))
+            gen.num_rows = rows
+            gen.num_cols = cols
+
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
         self.scene.clone_environments(copy_from_source=False)
@@ -164,7 +178,11 @@ class Rob6323Go2Env(DirectRLEnv):
             self._commands += alpha * (self._commands_target - self._commands)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        # IMPORTANT FIX: rewards/dones may be computed before observations in DirectRLEnv
+        # so gait/contact targets (and foot_indices) must be updated here (early).
         self._update_commands()
+        self._step_contact_targets()
+
         self._actions = actions.clone()
         self.desired_joint_pos = self.cfg.action_scale * self._actions + self.robot.data.default_joint_pos
 
@@ -181,10 +199,12 @@ class Rob6323Go2Env(DirectRLEnv):
     # Height scan -> observation
     # ---------------------------
     def _update_height_scan_obs(self):
-        # hits: (N, R, 3). We use z of hit points.
-        hits_w = self._height_scanner.data.ray_hits_w
-        hits_z = hits_w[..., 2]  # (N, R)
+        hits_w = getattr(self._height_scanner.data, "ray_hits_w", None)
+        if hits_w is None:
+            self._height_scan_obs.zero_()
+            return
 
+        hits_z = hits_w[..., 2]  # (N, R)
         base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)  # (N, 1)
 
         # if a ray missed, make it "ground at base height" -> relative height 0
@@ -195,14 +215,12 @@ class Rob6323Go2Env(DirectRLEnv):
 
         # Ensure buffer matches configured observation length
         if rel.shape[1] != self._height_scan_obs.shape[1]:
-            # fallback: resize to actual ray count (should not happen if cfg matches)
             self._height_scan_obs = torch.zeros(self.num_envs, rel.shape[1], device=self.device)
+
         self._height_scan_obs[:] = rel
 
     def _get_observations(self) -> dict:
-        self._step_contact_targets()
         self._previous_actions = self._actions.clone()
-
         self._update_height_scan_obs()
 
         obs = torch.cat(
@@ -271,13 +289,16 @@ class Rob6323Go2Env(DirectRLEnv):
         rew_track_contacts = match.mean(dim=1)
 
         # base height relative to local ground (estimated from ray hits)
-        hits_w = self._height_scanner.data.ray_hits_w
-        hits_z = hits_w[..., 2]
-        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
-        hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
-        ground_z = torch.mean(hits_z, dim=1)
-        base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
-        rew_base_height = (base_h_rel - float(self.cfg.base_height_target_m)) ** 2
+        hits_w = getattr(self._height_scanner.data, "ray_hits_w", None)
+        if hits_w is None:
+            rew_base_height = torch.zeros(self.num_envs, device=self.device)
+        else:
+            hits_z = hits_w[..., 2]
+            base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
+            hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
+            ground_z = torch.mean(hits_z, dim=1)
+            base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
+            rew_base_height = (base_h_rel - float(self.cfg.base_height_target_m)) ** 2
 
         # non-foot contact
         if self._undesired_contact_ids_sensor.numel() > 0:
@@ -317,13 +338,16 @@ class Rob6323Go2Env(DirectRLEnv):
     # ---------------------------
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         # terminate if base is too low relative to local ground
-        hits_w = self._height_scanner.data.ray_hits_w
-        hits_z = hits_w[..., 2]
-        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
-        hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
-        ground_z = torch.mean(hits_z, dim=1)
-        base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
-        cstr_base_height_min = base_h_rel < float(self.cfg.base_height_min)
+        hits_w = getattr(self._height_scanner.data, "ray_hits_w", None)
+        if hits_w is None:
+            cstr_base_height_min = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        else:
+            hits_z = hits_w[..., 2]
+            base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
+            hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
+            ground_z = torch.mean(hits_z, dim=1)
+            base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
+            cstr_base_height_min = base_h_rel < float(self.cfg.base_height_min)
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
@@ -374,7 +398,6 @@ class Rob6323Go2Env(DirectRLEnv):
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             val = episodic_sum_avg / self.max_episode_length_s
 
-            # OPTIONAL: rubric-style scaling for tracking curves (does not change training)
             if key in ("track_lin_vel_xy_exp", "track_ang_vel_z_exp"):
                 val = val / self.step_dt
 
@@ -389,6 +412,9 @@ class Rob6323Go2Env(DirectRLEnv):
 
         self.last_actions[env_ids] = 0.0
         self.gait_indices[env_ids] = 0
+        self.foot_indices[env_ids] = 0
+        self.clock_inputs[env_ids] = 0
+        self.desired_contact_states[env_ids] = 0
 
     # ---------------------------
     # Debug viz
@@ -501,7 +527,7 @@ class Rob6323Go2Env(DirectRLEnv):
         self.desired_contact_states[:, 3] = sm_RR
 
     # ---------------------------
-    # Raibert heuristic (vy fixed + ordering consistent)
+    # Raibert heuristic
     # ---------------------------
     def _reward_raibert_heuristic(self):
         cur_footsteps_translated = self.foot_positions_w - self.robot.data.root_pos_w.unsqueeze(1)
@@ -529,7 +555,7 @@ class Rob6323Go2Env(DirectRLEnv):
         frequencies = torch.tensor([3.0], device=self.device)
 
         x_vel_des = self._commands[:, 0:1]
-        y_vel_des = self._commands[:, 1:2]  # correct: vy command
+        y_vel_des = self._commands[:, 1:2]
 
         desired_ys_offset = phases * y_vel_des * (0.5 / frequencies.unsqueeze(1))
         desired_xs_offset = phases * x_vel_des * (0.5 / frequencies.unsqueeze(1))
