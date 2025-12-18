@@ -18,7 +18,6 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import sample_uniform
 import isaaclab.utils.math as math_utils
 
-# NEW: height scanner
 from isaaclab.sensors.ray_caster import RayCaster
 
 from .rob6323_go2_env_cfg import Rob6323Go2EnvCfg
@@ -60,7 +59,7 @@ class Rob6323Go2Env(DirectRLEnv):
         # debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
 
-        # PD control gains
+        # PD gains
         self.Kp = torch.tensor([cfg.Kp] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.Kd = torch.tensor([cfg.Kd] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.torque_limits = float(cfg.torque_limits)
@@ -109,10 +108,10 @@ class Rob6323Go2Env(DirectRLEnv):
         self.clock_inputs = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
         self.desired_contact_states = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
 
-        # IMPORTANT: ensure Raibert always has a valid foot phase tensor (avoid crash if reward runs before obs)
+        # IMPORTANT: ensure Raibert is always safe
         self.foot_indices = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
 
-        # height scan obs buffer
+        # height scan obs
         self._height_scan_obs = torch.zeros(self.num_envs, self.cfg.height_scan_num_rays, device=self.device)
 
     @property
@@ -167,9 +166,8 @@ class Rob6323Go2Env(DirectRLEnv):
             self._commands += alpha * (self._commands_target - self._commands)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        # update commands and gait phase each step (so rewards are safe even if called before obs)
         self._update_commands()
-        self._step_contact_targets()
+        self._step_contact_targets()  # keep phases updated every step
 
         self._actions = actions.clone()
         self.desired_joint_pos = self.cfg.action_scale * self._actions + self.robot.data.default_joint_pos
@@ -187,17 +185,14 @@ class Rob6323Go2Env(DirectRLEnv):
     # Height scan -> observation
     # ---------------------------
     def _update_height_scan_obs(self):
-        hits_w = self._height_scanner.data.ray_hits_w          # (N, R, 3)
-        hits_z = hits_w[..., 2]                                # (N, R)
-        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1) # (N, 1)
+        hits_w = self._height_scanner.data.ray_hits_w
+        hits_z = hits_w[..., 2]
+        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
 
-        # if a ray missed, treat as "ground at base height" -> relative height 0
         hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
-
-        rel = hits_z - base_z  # negative means terrain below base
+        rel = hits_z - base_z
         rel = torch.clamp(rel, -1.0, 0.5)
 
-        # keep buffer shape consistent (should match cfg)
         if rel.shape[1] != self._height_scan_obs.shape[1]:
             self._height_scan_obs = torch.zeros(self.num_envs, rel.shape[1], device=self.device)
         self._height_scan_obs[:] = rel
@@ -227,6 +222,7 @@ class Rob6323Go2Env(DirectRLEnv):
     # Rewards
     # ---------------------------
     def _get_rewards(self) -> torch.Tensor:
+        # tracking
         lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self.robot.data.root_lin_vel_b[:, :2]), dim=1)
         lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
 
@@ -255,21 +251,21 @@ class Rob6323Go2Env(DirectRLEnv):
         rew_dof_vel = (qd ** 2).sum(dim=1)
         rew_ang_vel_xy = (ang[:, 0] ** 2 + ang[:, 1] ** 2)
 
-        # foot clearance
+        # foot clearance (weakened)
         foot_h = self.foot_positions_w[:, :, 2]
         swing_w = 1.0 - self.desired_contact_states
         clearance = float(self.cfg.feet_clearance_target_m)
         err = torch.clamp(clearance - foot_h, min=0.0)
         rew_feet_clearance = (swing_w * (err ** 2)).sum(dim=1)
 
-        # contact shaping
+        # contact shaping (weakened)
         forces_w = self._contact_sensor.data.net_forces_w[:, self._feet_ids_sensor, :]
         fmag = torch.linalg.norm(forces_w, dim=-1)
         contact_strength = torch.tanh(fmag / float(self.cfg.contact_force_scale))
         match = 1.0 - torch.abs(contact_strength - self.desired_contact_states)
         rew_track_contacts = match.mean(dim=1)
 
-        # base height relative to local terrain (from ray hits)
+        # base height relative to local ground (weak)
         hits_w = self._height_scanner.data.ray_hits_w
         hits_z = hits_w[..., 2]
         base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
@@ -315,7 +311,7 @@ class Rob6323Go2Env(DirectRLEnv):
     # Termination
     # ---------------------------
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # terminate if base is too low relative to local terrain
+        # terrain-relative base height termination
         hits_w = self._height_scanner.data.ray_hits_w
         hits_z = hits_w[..., 2]
         base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
@@ -326,7 +322,7 @@ class Rob6323Go2Env(DirectRLEnv):
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        net_contact_forces = self._contact_sensor.data.net_forces_w_history  # (N,H,B,3)
+        net_contact_forces = self._contact_sensor.data.net_forces_w_history
         base_force_mag_hist = torch.linalg.norm(net_contact_forces[:, :, int(self._base_id), :], dim=-1)
         cstr_termination_contacts = torch.any(base_force_mag_hist > 1.0, dim=1)
 
@@ -371,10 +367,8 @@ class Rob6323Go2Env(DirectRLEnv):
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             val = episodic_sum_avg / self.max_episode_length_s
-
             if key in ("track_lin_vel_xy_exp", "track_ang_vel_z_exp"):
                 val = val / self.step_dt
-
             log_dict["Episode_Reward/" + key] = val
             self._episode_sums[key][env_ids] = 0.0
 
