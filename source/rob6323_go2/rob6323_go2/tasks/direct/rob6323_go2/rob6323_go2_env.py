@@ -8,7 +8,6 @@ from __future__ import annotations
 import gymnasium as gym
 import numpy as np
 import torch
-import math
 from collections.abc import Sequence
 
 import isaaclab.sim as sim_utils
@@ -19,6 +18,7 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import sample_uniform
 import isaaclab.utils.math as math_utils
 
+# NEW: height scanner
 from isaaclab.sensors.ray_caster import RayCaster
 
 from .rob6323_go2_env_cfg import Rob6323Go2EnvCfg
@@ -60,7 +60,7 @@ class Rob6323Go2Env(DirectRLEnv):
         # debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
 
-        # PD gains
+        # PD control gains
         self.Kp = torch.tensor([cfg.Kp] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.Kd = torch.tensor([cfg.Kd] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.torque_limits = float(cfg.torque_limits)
@@ -109,7 +109,7 @@ class Rob6323Go2Env(DirectRLEnv):
         self.clock_inputs = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
         self.desired_contact_states = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
 
-        # IMPORTANT FIX: foot_indices is used in rewards (raibert) — must exist before first reward call
+        # IMPORTANT: ensure Raibert always has a valid foot phase tensor (avoid crash if reward runs before obs)
         self.foot_indices = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
 
         # height scan obs buffer
@@ -131,19 +131,8 @@ class Rob6323Go2Env(DirectRLEnv):
         self.scene.sensors["contact_sensor"] = self._contact_sensor
         self.scene.sensors["height_scanner"] = self._height_scanner
 
-        # terrain env settings
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
-
-        # IMPORTANT FIX: if num_envs is large and generator grid is 1x1, all envs share same origin -> crash
-        gen = getattr(self.cfg.terrain, "terrain_generator", None)
-        if gen is not None and getattr(gen, "num_rows", 1) == 1 and getattr(gen, "num_cols", 1) == 1:
-            n = int(self.scene.cfg.num_envs)
-            rows = int(math.ceil(math.sqrt(n)))
-            cols = int(math.ceil(n / rows))
-            gen.num_rows = rows
-            gen.num_cols = cols
-
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
 
         self.scene.clone_environments(copy_from_source=False)
@@ -178,8 +167,7 @@ class Rob6323Go2Env(DirectRLEnv):
             self._commands += alpha * (self._commands_target - self._commands)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        # IMPORTANT FIX: rewards/dones may be computed before observations in DirectRLEnv
-        # so gait/contact targets (and foot_indices) must be updated here (early).
+        # update commands and gait phase each step (so rewards are safe even if called before obs)
         self._update_commands()
         self._step_contact_targets()
 
@@ -199,24 +187,19 @@ class Rob6323Go2Env(DirectRLEnv):
     # Height scan -> observation
     # ---------------------------
     def _update_height_scan_obs(self):
-        hits_w = getattr(self._height_scanner.data, "ray_hits_w", None)
-        if hits_w is None:
-            self._height_scan_obs.zero_()
-            return
+        hits_w = self._height_scanner.data.ray_hits_w          # (N, R, 3)
+        hits_z = hits_w[..., 2]                                # (N, R)
+        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1) # (N, 1)
 
-        hits_z = hits_w[..., 2]  # (N, R)
-        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)  # (N, 1)
-
-        # if a ray missed, make it "ground at base height" -> relative height 0
+        # if a ray missed, treat as "ground at base height" -> relative height 0
         hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
 
-        rel = hits_z - base_z  # negative means ground below base
+        rel = hits_z - base_z  # negative means terrain below base
         rel = torch.clamp(rel, -1.0, 0.5)
 
-        # Ensure buffer matches configured observation length
+        # keep buffer shape consistent (should match cfg)
         if rel.shape[1] != self._height_scan_obs.shape[1]:
             self._height_scan_obs = torch.zeros(self.num_envs, rel.shape[1], device=self.device)
-
         self._height_scan_obs[:] = rel
 
     def _get_observations(self) -> dict:
@@ -244,7 +227,6 @@ class Rob6323Go2Env(DirectRLEnv):
     # Rewards
     # ---------------------------
     def _get_rewards(self) -> torch.Tensor:
-        # tracking
         lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self.robot.data.root_lin_vel_b[:, :2]), dim=1)
         lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
 
@@ -260,7 +242,6 @@ class Rob6323Go2Env(DirectRLEnv):
         self.last_actions = torch.roll(self.last_actions, 1, 2)
         self.last_actions[:, :, 0] = self._actions[:]
 
-        # raibert
         rew_raibert_heuristic = self._reward_raibert_heuristic()
 
         # stability
@@ -288,17 +269,14 @@ class Rob6323Go2Env(DirectRLEnv):
         match = 1.0 - torch.abs(contact_strength - self.desired_contact_states)
         rew_track_contacts = match.mean(dim=1)
 
-        # base height relative to local ground (estimated from ray hits)
-        hits_w = getattr(self._height_scanner.data, "ray_hits_w", None)
-        if hits_w is None:
-            rew_base_height = torch.zeros(self.num_envs, device=self.device)
-        else:
-            hits_z = hits_w[..., 2]
-            base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
-            hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
-            ground_z = torch.mean(hits_z, dim=1)
-            base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
-            rew_base_height = (base_h_rel - float(self.cfg.base_height_target_m)) ** 2
+        # base height relative to local terrain (from ray hits)
+        hits_w = self._height_scanner.data.ray_hits_w
+        hits_z = hits_w[..., 2]
+        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
+        hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
+        ground_z = torch.mean(hits_z, dim=1)
+        base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
+        rew_base_height = (base_h_rel - float(self.cfg.base_height_target_m)) ** 2
 
         # non-foot contact
         if self._undesired_contact_ids_sensor.numel() > 0:
@@ -337,23 +315,19 @@ class Rob6323Go2Env(DirectRLEnv):
     # Termination
     # ---------------------------
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # terminate if base is too low relative to local ground
-        hits_w = getattr(self._height_scanner.data, "ray_hits_w", None)
-        if hits_w is None:
-            cstr_base_height_min = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        else:
-            hits_z = hits_w[..., 2]
-            base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
-            hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
-            ground_z = torch.mean(hits_z, dim=1)
-            base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
-            cstr_base_height_min = base_h_rel < float(self.cfg.base_height_min)
+        # terminate if base is too low relative to local terrain
+        hits_w = self._height_scanner.data.ray_hits_w
+        hits_z = hits_w[..., 2]
+        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
+        hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
+        ground_z = torch.mean(hits_z, dim=1)
+        base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
+        cstr_base_height_min = base_h_rel < float(self.cfg.base_height_min)
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
         net_contact_forces = self._contact_sensor.data.net_forces_w_history  # (N,H,B,3)
-        base_id = int(self._base_id)
-        base_force_mag_hist = torch.linalg.norm(net_contact_forces[:, :, base_id, :], dim=-1)
+        base_force_mag_hist = torch.linalg.norm(net_contact_forces[:, :, int(self._base_id), :], dim=-1)
         cstr_termination_contacts = torch.any(base_force_mag_hist > 1.0, dim=1)
 
         cstr_upsidedown = self.robot.data.projected_gravity_b[:, 2] > 0
@@ -411,10 +385,8 @@ class Rob6323Go2Env(DirectRLEnv):
         self.extras["episode"].update(log_dict)
 
         self.last_actions[env_ids] = 0.0
-        self.gait_indices[env_ids] = 0
-        self.foot_indices[env_ids] = 0
-        self.clock_inputs[env_ids] = 0
-        self.desired_contact_states[env_ids] = 0
+        self.gait_indices[env_ids] = 0.0
+        self.foot_indices[env_ids] = 0.0
 
     # ---------------------------
     # Debug viz
@@ -455,7 +427,6 @@ class Rob6323Go2Env(DirectRLEnv):
 
         base_quat_w = self.robot.data.root_quat_w
         arrow_quat = math_utils.quat_mul(base_quat_w, arrow_quat)
-
         return arrow_scale, arrow_quat
 
     # ---------------------------
@@ -467,9 +438,9 @@ class Rob6323Go2Env(DirectRLEnv):
         offsets = 0.0
         bounds = 0.0
         durations = 0.5 * torch.ones((self.num_envs,), dtype=torch.float32, device=self.device)
+
         self.gait_indices = torch.remainder(self.gait_indices + self.step_dt * frequencies, 1.0)
 
-        # Order consistent with feet: [FL, FR, RL, RR]
         foot_indices = [
             self.gait_indices + phases + offsets + bounds,  # FL
             self.gait_indices + offsets,                    # FR
@@ -538,7 +509,6 @@ class Rob6323Go2Env(DirectRLEnv):
                 math_utils.quat_conjugate(self.robot.data.root_quat_w), cur_footsteps_translated[:, i, :]
             )
 
-        # Order: [FL, FR, RL, RR]
         desired_stance_width = 0.25
         desired_ys_nom = torch.tensor(
             [desired_stance_width / 2, -desired_stance_width / 2, desired_stance_width / 2, -desired_stance_width / 2],
@@ -564,6 +534,5 @@ class Rob6323Go2Env(DirectRLEnv):
         desired_xs_nom = desired_xs_nom + desired_xs_offset
 
         desired_footsteps_body_frame = torch.cat((desired_xs_nom.unsqueeze(2), desired_ys_nom.unsqueeze(2)), dim=2)
-
         err = torch.abs(desired_footsteps_body_frame - footsteps_in_body_frame[:, :, 0:2])
         return torch.sum(torch.square(err), dim=(1, 2))
