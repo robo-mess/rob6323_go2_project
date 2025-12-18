@@ -17,12 +17,11 @@ from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.actuators import ImplicitActuatorCfg
 
-# NEW: official rough terrain generator config
+# Official rough terrain config
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
 
 def _grid_num_rays(size_xy: tuple[float, float], resolution: float) -> int:
-    """Compute number of rays for GridPatternCfg(size=(L,W), resolution=r)."""
     nx = int(size_xy[0] / resolution) + 1
     ny = int(size_xy[1] / resolution) + 1
     return nx * ny
@@ -39,37 +38,36 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     action_space = 12
 
     # -----------------------------
-    # Height scanner settings (ROUGH TERRAIN)
+    # Height scanner settings
     # -----------------------------
-    height_scan_size = (1.6, 1.0)     # (length, width) in meters
-    height_scan_resolution = 0.10     # meters
+    height_scan_size = (1.6, 1.0)       # (length, width) meters
+    height_scan_resolution = 0.10       # meters
     height_scan_num_rays = _grid_num_rays(height_scan_size, height_scan_resolution)
 
     # base obs(48) + clock(4) + height_scan
     observation_space = 48 + 4 + height_scan_num_rays
     state_space = 0
 
-    # IMPORTANT: enable arrows for rubric video check
+    # visualize arrows
     debug_vis = True
 
-    # Termination if base is too low relative to local ground
-    base_height_min = 0.10
+    # terminate if base too low relative to local ground
+    base_height_min = 0.12
 
     # -----------------------------
-    # Command following curriculum
+    # Commands (MAKE IT WALK FORWARD)
     # -----------------------------
     command_resample_time_s = 2.0
     command_smoothing_tau_s = 0.25
 
-    command_range_vx = (-1.0, 1.0)
-    command_range_vy = (-0.5, 0.5)
-    command_range_yaw = (-1.0, 1.0)
+    # forward only: prevents continuous spinning and makes progress obvious
+    command_range_vx = (0.4, 0.8)
+    command_range_vy = (0.0, 0.0)
+    command_range_yaw = (0.0, 0.0)
 
-    # PD control gains
+    # PD
     Kp = 20.0
     Kd = 0.5
-
-    # IMPORTANT: match actuator effort_limit
     torque_limits = 23.5
 
     # simulation
@@ -86,7 +84,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # -----------------------------
-    # Terrain (OFFICIAL ROUGH GENERATOR)
+    # Terrain (ROUGH)
     # -----------------------------
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
@@ -104,10 +102,10 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
-    # robot(s)
+    # robot
     robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
-    # disable implicit actuator gains (so your explicit PD is in control)
+    # disable implicit actuator gains (your PD is in control)
     robot_cfg.actuators["base_legs"] = ImplicitActuatorCfg(
         joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
         effort_limit=23.5,
@@ -126,9 +124,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         track_air_time=True,
     )
 
-    # -----------------------------
-    # Height scanner config (NEW)
-    # -----------------------------
+    # height scanner
     height_scanner_cfg: RayCasterCfg = RayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base",
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.6)),
@@ -141,7 +137,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         mesh_prim_paths=["/World/ground"],
     )
 
-    # arrows (command vs current velocity)
+    # arrows
     goal_vel_visualizer_cfg: VisualizationMarkersCfg = GREEN_ARROW_X_MARKER_CFG.replace(
         prim_path="/Visuals/Command/velocity_goal"
     )
@@ -152,30 +148,36 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
 
     # -----------------------------
-    # reward scales
+    # Reward scales (TUNED TO WALK, NOT STAND/SPIN)
     # -----------------------------
-    lin_vel_reward_scale = 1.0
-    yaw_rate_reward_scale = 0.5
+    # make tracking dominant so "standing still" is not attractive
+    lin_vel_reward_scale = 8.0
+    yaw_rate_reward_scale = 0.0
 
-    action_rate_reward_scale = -0.1
-    raibert_heuristic_reward_scale = -10.0
+    # smoothness
+    action_rate_reward_scale = -0.05
 
-    feet_clearance_reward_scale = -30.0
-    tracking_contacts_shaped_force_reward_scale = 4.0
+    # raibert can cause weird gaits on rough early training -> weaken a lot
+    raibert_heuristic_reward_scale = -1.0
 
-    # Part 5 stability penalties
-    orient_reward_scale = -5.0
-    lin_vel_z_reward_scale = -0.02
-    dof_vel_reward_scale = -0.0001
-    ang_vel_xy_reward_scale = -0.001
+    # stability penalties
+    orient_reward_scale = -2.0
+    lin_vel_z_reward_scale = -0.5     # stronger: discourages hopping
+    dof_vel_reward_scale = -0.00005
+    ang_vel_xy_reward_scale = -0.02
 
-    # Part 6 shaping constants
-    feet_clearance_target_m = 0.08
+    # clearance: reduce magnitude so it doesn't force bounding
+    feet_clearance_target_m = 0.06
+    feet_clearance_reward_scale = -5.0
+
+    # contact shaping: reduce so stomping isn't rewarded too much
+    tracking_contacts_shaped_force_reward_scale = 1.0
     contact_force_scale = 50.0
 
-    # base height is now interpreted as "relative to local ground"
+    # base height relative to ground: keep weak on rough terrain
     base_height_target_m = 0.32
-    base_height_reward_scale = -20.0
-    non_foot_contact_reward_scale = -2.0
+    base_height_reward_scale = -2.0
+    non_foot_contact_reward_scale = -1.0
 
+    # torque regularization
     torque_reward_scale = -1.0e-4
