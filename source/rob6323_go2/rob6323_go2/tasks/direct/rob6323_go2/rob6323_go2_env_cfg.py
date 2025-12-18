@@ -3,7 +3,6 @@
 # rob6323_go2_env_cfg.py
 # SPDX-License-Identifier: BSD-3-Clause
 
-from ast import pattern
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
 
 import isaaclab.sim as sim_utils
@@ -18,11 +17,11 @@ from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.actuators import ImplicitActuatorCfg
 
-# --- NEW: terrain generator + stairs sub-terrain
+# terrain generator + stairs sub-terrain
 from isaaclab.terrains import TerrainGeneratorCfg
 from isaaclab.terrains.height_field.hf_terrains_cfg import HfPyramidStairsTerrainCfg
 
-# --- NEW: height scanner (ray caster)
+# height scanner (ray caster)
 from isaaclab.sensors.ray_caster import RayCasterCfg
 from isaaclab.sensors.patterns import GridPatternCfg
 
@@ -44,7 +43,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     action_space = 12
 
     # -----------------------------
-    # Height scanner settings (NEW)
+    # Height scanner settings
     # -----------------------------
     height_scan_size = (1.8, 1.2)        # (length, width) in meters
     height_scan_resolution = 0.20        # meters
@@ -66,7 +65,6 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     command_resample_time_s = 2.0
     command_smoothing_tau_s = 0.25
 
-    # Force straight stair traversal (reliable up+down demo)
     command_range_vx = (0.6, 1.0)
     command_range_vy = (0.0, 0.0)
     command_range_yaw = (0.0, 0.0)
@@ -75,7 +73,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     Kp = 20.0
     Kd = 0.5
 
-    # IMPORTANT: match actuator effort_limit (keeps clipping + torque penalty consistent)
+    # IMPORTANT: match actuator effort_limit
     torque_limits = 23.5
 
     # simulation
@@ -93,6 +91,8 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
 
     # -----------------------------
     # Terrain (STAIRS ONLY)
+    # NOTE: num_rows/num_cols will be AUTO-FIXED in env._setup_scene
+    #       so it matches scene.num_envs and doesn't crash.
     # -----------------------------
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
@@ -109,10 +109,14 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         terrain_generator=TerrainGeneratorCfg(
             seed=0,
             curriculum=False,
-            # one big tile so the robot can traverse up then down within same env
-            size=(10.0, 10.0),
+
+            # Per-tile size (smaller than 10x10 reduces giant mesh when num_envs is large)
+            size=(6.0, 6.0),
+
+            # placeholders; env code will overwrite these based on num_envs
             num_rows=1,
             num_cols=1,
+
             horizontal_scale=0.1,
             vertical_scale=0.005,
             slope_threshold=0.75,
@@ -129,8 +133,6 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
 
     # robot(s)
     robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    print("Actuator keys:", list(UNITREE_GO2_CFG.actuators.keys()))
-
 
     # disable implicit actuator gains (so your explicit PD is in control)
     robot_cfg.actuators["base_legs"] = ImplicitActuatorCfg(
@@ -142,7 +144,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=4.0, replicate_physics=True)
 
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
@@ -152,7 +154,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # -----------------------------
-    # Height scanner config (NEW)
+    # Height scanner config
     # -----------------------------
     height_scanner_cfg: RayCasterCfg = RayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base",
@@ -185,7 +187,6 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     action_rate_reward_scale = -0.1
     raibert_heuristic_reward_scale = -10.0
 
-    # stairs need a bit more clearance target
     feet_clearance_target_m = 0.12
     feet_clearance_reward_scale = -30.0
 
@@ -198,12 +199,10 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     dof_vel_reward_scale = -0.0001
     ang_vel_xy_reward_scale = -0.001
 
-    # base height relative to local ground (enforced in env code)
+    # base height relative to local ground
     base_height_target_m = 0.32
     base_height_reward_scale = -20.0
     non_foot_contact_reward_scale = -2.0
 
     # torque regularization
     torque_reward_scale = -1.0e-4
-
-
