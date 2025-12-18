@@ -3,6 +3,7 @@
 # rob6323_go2_env_cfg.py
 # SPDX-License-Identifier: BSD-3-Clause
 
+from ast import pattern
 from isaaclab_assets.robots.unitree import UNITREE_GO2_CFG
 
 import isaaclab.sim as sim_utils
@@ -128,6 +129,8 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
 
     # robot(s)
     robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    print("Actuator keys:", list(UNITREE_GO2_CFG.actuators.keys()))
+
 
     # disable implicit actuator gains (so your explicit PD is in control)
     robot_cfg.actuators["base_legs"] = ImplicitActuatorCfg(
@@ -139,7 +142,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4.0, replicate_physics=True)
 
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
@@ -202,3 +205,5 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
 
     # torque regularization
     torque_reward_scale = -1.0e-4
+
+
