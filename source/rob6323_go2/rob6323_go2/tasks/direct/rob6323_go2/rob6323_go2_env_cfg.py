@@ -11,14 +11,12 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
-from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg
+from isaaclab.terrains.height_field.hf_terrains_cfg import HfPyramidStairsTerrainCfg
 from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.actuators import ImplicitActuatorCfg
-
-# Official rough terrain config
-from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
 
 def _grid_num_rays(size_xy: tuple[float, float], resolution: float) -> int:
@@ -31,7 +29,7 @@ def _grid_num_rays(size_xy: tuple[float, float], resolution: float) -> int:
 class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     # env
     decimation = 4
-    episode_length_s = 20.0
+    episode_length_s = 30.0  # enough time to go up + down
 
     # spaces
     action_scale = 0.25
@@ -44,28 +42,27 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     height_scan_resolution = 0.10       # meters
     height_scan_num_rays = _grid_num_rays(height_scan_size, height_scan_resolution)
 
-    # base obs(48) + clock(4) + height_scan
+    # base obs(48) + clock(4) + height scan
     observation_space = 48 + 4 + height_scan_num_rays
     state_space = 0
 
-    # visualize arrows
+    # arrows for video
     debug_vis = True
 
-    # terminate if base too low relative to local ground
-    base_height_min = 0.12
+    # terminate if base is too low relative to local ground
+    base_height_min = 0.10
 
     # -----------------------------
-    # Commands (MAKE IT WALK FORWARD)
+    # Commands (STAIRS DEMO: forward only)
     # -----------------------------
     command_resample_time_s = 2.0
     command_smoothing_tau_s = 0.25
 
-    # forward only: prevents continuous spinning and makes progress obvious
-    command_range_vx = (0.4, 0.8)
+    command_range_vx = (0.30, 0.60)
     command_range_vy = (0.0, 0.0)
     command_range_yaw = (0.0, 0.0)
 
-    # PD
+    # PD gains
     Kp = 20.0
     Kd = 0.5
     torque_limits = 23.5
@@ -84,13 +81,12 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # -----------------------------
-    # Terrain (ROUGH)
+    # Terrain (STAIRS ONLY, EASY)
     # -----------------------------
+    # NOTE: env_spacing must be >= tile size to avoid overlap
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="generator",
-        terrain_generator=ROUGH_TERRAINS_CFG,
-        max_init_terrain_level=9,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -100,12 +96,31 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
             restitution=0.0,
         ),
         debug_vis=False,
+        terrain_generator=TerrainGeneratorCfg(
+            seed=0,
+            curriculum=False,
+            # each env gets its own 8x8m tile (enough space for up+down)
+            size=(8.0, 8.0),
+            num_rows=1,
+            num_cols=1,
+            horizontal_scale=0.10,
+            vertical_scale=0.005,
+            slope_threshold=0.75,
+            sub_terrains={
+                "stairs": HfPyramidStairsTerrainCfg(
+                    proportion=1.0,                  # ONLY STAIRS
+                    step_height_range=(0.03, 0.06),  # easy
+                    step_width=0.30,                 # easy
+                    platform_width=1.5,              # top platform
+                ),
+            },
+        ),
     )
 
     # robot
     robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
-    # disable implicit actuator gains (your PD is in control)
+    # disable implicit actuator gains (your explicit PD is in control)
     robot_cfg.actuators["base_legs"] = ImplicitActuatorCfg(
         joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
         effort_limit=23.5,
@@ -115,7 +130,8 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
+    # For training you can increase num_envs; for video set num_envs=1.
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=8.0, replicate_physics=True)
 
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
@@ -148,36 +164,30 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
 
     # -----------------------------
-    # Reward scales (TUNED TO WALK, NOT STAND/SPIN)
+    # Rewards (tuned to avoid spin/run-in-place)
     # -----------------------------
-    # make tracking dominant so "standing still" is not attractive
-    lin_vel_reward_scale = 8.0
+    lin_vel_reward_scale = 10.0
     yaw_rate_reward_scale = 0.0
 
-    # smoothness
     action_rate_reward_scale = -0.05
+    raibert_heuristic_reward_scale = -1.0  # keep weak on stairs
 
-    # raibert can cause weird gaits on rough early training -> weaken a lot
-    raibert_heuristic_reward_scale = -1.0
-
-    # stability penalties
+    # stability
     orient_reward_scale = -2.0
-    lin_vel_z_reward_scale = -0.5     # stronger: discourages hopping
+    lin_vel_z_reward_scale = -0.5
     dof_vel_reward_scale = -0.00005
     ang_vel_xy_reward_scale = -0.02
 
-    # clearance: reduce magnitude so it doesn't force bounding
-    feet_clearance_target_m = 0.06
-    feet_clearance_reward_scale = -5.0
+    # clearance/contact
+    feet_clearance_target_m = 0.08
+    feet_clearance_reward_scale = -8.0
 
-    # contact shaping: reduce so stomping isn't rewarded too much
     tracking_contacts_shaped_force_reward_scale = 1.0
     contact_force_scale = 50.0
 
-    # base height relative to ground: keep weak on rough terrain
+    # ground-relative base height (weak)
     base_height_target_m = 0.32
     base_height_reward_scale = -2.0
     non_foot_contact_reward_scale = -1.0
 
-    # torque regularization
     torque_reward_scale = -1.0e-4
