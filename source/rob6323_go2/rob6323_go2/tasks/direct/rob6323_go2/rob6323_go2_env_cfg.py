@@ -12,21 +12,17 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.actuators import ImplicitActuatorCfg
 
-# terrain generator + stairs sub-terrain
-from isaaclab.terrains import TerrainGeneratorCfg
-from isaaclab.terrains.height_field.hf_terrains_cfg import HfPyramidStairsTerrainCfg
-
-# height scanner (ray caster)
-from isaaclab.sensors.ray_caster import RayCasterCfg
-from isaaclab.sensors.patterns import GridPatternCfg
+# NEW: official rough terrain generator config
+from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
 
 
 def _grid_num_rays(size_xy: tuple[float, float], resolution: float) -> int:
+    """Compute number of rays for GridPatternCfg(size=(L,W), resolution=r)."""
     nx = int(size_xy[0] / resolution) + 1
     ny = int(size_xy[1] / resolution) + 1
     return nx * ny
@@ -36,38 +32,38 @@ def _grid_num_rays(size_xy: tuple[float, float], resolution: float) -> int:
 class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     # env
     decimation = 4
-    episode_length_s = 30.0  # longer so you clearly see up + down
+    episode_length_s = 20.0
 
     # spaces
     action_scale = 0.25
     action_space = 12
 
     # -----------------------------
-    # Height scanner settings
+    # Height scanner settings (ROUGH TERRAIN)
     # -----------------------------
-    height_scan_size = (1.8, 1.2)        # (length, width) in meters
-    height_scan_resolution = 0.20        # meters
+    height_scan_size = (1.6, 1.0)     # (length, width) in meters
+    height_scan_resolution = 0.10     # meters
     height_scan_num_rays = _grid_num_rays(height_scan_size, height_scan_resolution)
 
-    # base obs (48) + clock(4) + height scan
+    # base obs(48) + clock(4) + height_scan
     observation_space = 48 + 4 + height_scan_num_rays
     state_space = 0
 
-    # enable for video (green/blue arrows)
+    # IMPORTANT: enable arrows for rubric video check
     debug_vis = True
 
-    # Terminate if base is too low relative to local ground (handled in env code)
+    # Termination if base is too low relative to local ground
     base_height_min = 0.10
 
     # -----------------------------
-    # Commands (STAIRS DEMO: forward only)
+    # Command following curriculum
     # -----------------------------
     command_resample_time_s = 2.0
     command_smoothing_tau_s = 0.25
 
-    command_range_vx = (0.6, 1.0)
-    command_range_vy = (0.0, 0.0)
-    command_range_yaw = (0.0, 0.0)
+    command_range_vx = (-1.0, 1.0)
+    command_range_vy = (-0.5, 0.5)
+    command_range_yaw = (-1.0, 1.0)
 
     # PD control gains
     Kp = 20.0
@@ -90,13 +86,13 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # -----------------------------
-    # Terrain (STAIRS ONLY)
-    # NOTE: num_rows/num_cols will be AUTO-FIXED in env._setup_scene
-    #       so it matches scene.num_envs and doesn't crash.
+    # Terrain (OFFICIAL ROUGH GENERATOR)
     # -----------------------------
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="generator",
+        terrain_generator=ROUGH_TERRAINS_CFG,
+        max_init_terrain_level=9,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -106,29 +102,6 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
             restitution=0.0,
         ),
         debug_vis=False,
-        terrain_generator=TerrainGeneratorCfg(
-            seed=0,
-            curriculum=False,
-
-            # Per-tile size (smaller than 10x10 reduces giant mesh when num_envs is large)
-            size=(6.0, 6.0),
-
-            # placeholders; env code will overwrite these based on num_envs
-            num_rows=1,
-            num_cols=1,
-
-            horizontal_scale=0.1,
-            vertical_scale=0.005,
-            slope_threshold=0.75,
-            sub_terrains={
-                "stairs": HfPyramidStairsTerrainCfg(
-                    proportion=1.0,                 # ONLY STAIRS
-                    step_height_range=(0.05, 0.10), # difficulty knob
-                    step_width=0.25,
-                    platform_width=2.0,
-                ),
-            },
-        ),
     )
 
     # robot(s)
@@ -144,7 +117,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=4.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
 
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
@@ -154,13 +127,13 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # -----------------------------
-    # Height scanner config
+    # Height scanner config (NEW)
     # -----------------------------
     height_scanner_cfg: RayCasterCfg = RayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base",
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.6)),
         ray_alignment="yaw",
-        pattern_cfg=GridPatternCfg(
+        pattern_cfg=patterns.GridPatternCfg(
             resolution=height_scan_resolution,
             size=list(height_scan_size),
         ),
@@ -187,22 +160,22 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     action_rate_reward_scale = -0.1
     raibert_heuristic_reward_scale = -10.0
 
-    feet_clearance_target_m = 0.12
     feet_clearance_reward_scale = -30.0
-
     tracking_contacts_shaped_force_reward_scale = 4.0
-    contact_force_scale = 50.0
 
-    # stability penalties
+    # Part 5 stability penalties
     orient_reward_scale = -5.0
     lin_vel_z_reward_scale = -0.02
     dof_vel_reward_scale = -0.0001
     ang_vel_xy_reward_scale = -0.001
 
-    # base height relative to local ground
+    # Part 6 shaping constants
+    feet_clearance_target_m = 0.08
+    contact_force_scale = 50.0
+
+    # base height is now interpreted as "relative to local ground"
     base_height_target_m = 0.32
     base_height_reward_scale = -20.0
     non_foot_contact_reward_scale = -2.0
 
-    # torque regularization
     torque_reward_scale = -1.0e-4
