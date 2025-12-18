@@ -29,16 +29,13 @@ class Rob6323Go2Env(DirectRLEnv):
     def __init__(self, cfg: Rob6323Go2EnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
-        # actions
         self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self._previous_actions = torch.zeros_like(self._actions)
 
-        # commands (smoothed)
         self._commands = torch.zeros(self.num_envs, 3, device=self.device)
         self._commands_target = torch.zeros_like(self._commands)
         self._command_time = torch.zeros(self.num_envs, device=self.device)
 
-        # logging
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
@@ -52,19 +49,15 @@ class Rob6323Go2Env(DirectRLEnv):
             ]
         }
 
-        # base body id in contact sensor
         self._base_id, _ = self._contact_sensor.find_bodies("base")
         self._base_id = int(self._base_id[0])
 
-        # debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
 
-        # PD gains
         self.Kp = torch.tensor([cfg.Kp] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.Kd = torch.tensor([cfg.Kd] * 12, device=self.device).unsqueeze(0).repeat(self.num_envs, 1)
         self.torque_limits = float(cfg.torque_limits)
 
-        # action history for smoothness penalty
         self.last_actions = torch.zeros(
             self.num_envs,
             gym.spaces.flatdim(self.single_action_space),
@@ -74,20 +67,18 @@ class Rob6323Go2Env(DirectRLEnv):
             requires_grad=False,
         )
 
-        # feet indices in ARTICULATION (for positions)
+        # feet ids
         self._feet_ids = []
         foot_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
         for name in foot_names:
-            id_list, _ = self.robot.find_bodies(name)
-            self._feet_ids.append(int(id_list[0]))
+            ids, _ = self.robot.find_bodies(name)
+            self._feet_ids.append(int(ids[0]))
 
-        # feet indices in CONTACT SENSOR (for forces)
         self._feet_ids_sensor = []
         for name in foot_names:
-            id_list, _ = self._contact_sensor.find_bodies(name)
-            self._feet_ids_sensor.append(int(id_list[0]))
+            ids, _ = self._contact_sensor.find_bodies(name)
+            self._feet_ids_sensor.append(int(ids[0]))
 
-        # undesired contacts (knees/hips/thigh/calf touching ground)
         undesired = []
         for pat in [".*thigh", ".*calf", ".*hip"]:
             ids, _ = self._contact_sensor.find_bodies(pat)
@@ -100,15 +91,12 @@ class Rob6323Go2Env(DirectRLEnv):
             dtype=torch.long,
         )
 
-        # last torques for torque penalty
         self._last_torques = torch.zeros(self.num_envs, 12, device=self.device)
 
-        # gait / clock
+        # gait/clock
         self.gait_indices = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.clock_inputs = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
         self.desired_contact_states = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
-
-        # IMPORTANT: ensure Raibert is always safe
         self.foot_indices = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
 
         # height scan obs
@@ -116,14 +104,11 @@ class Rob6323Go2Env(DirectRLEnv):
 
     @property
     def foot_positions_w(self) -> torch.Tensor:
-        """Feet positions in world. Order: [FL, FR, RL, RR]."""
         return self.robot.data.body_pos_w[:, self._feet_ids]
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
-
-        # height scanner
         self._height_scanner = RayCaster(self.cfg.height_scanner_cfg)
 
         self.scene.articulations["robot"] = self.robot
@@ -167,7 +152,7 @@ class Rob6323Go2Env(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self._update_commands()
-        self._step_contact_targets()  # keep phases updated every step
+        self._step_contact_targets()
 
         self._actions = actions.clone()
         self.desired_joint_pos = self.cfg.action_scale * self._actions + self.robot.data.default_joint_pos
@@ -182,21 +167,33 @@ class Rob6323Go2Env(DirectRLEnv):
         self.robot.set_joint_effort_target(torques)
 
     # ---------------------------
-    # Height scan -> observation
+    # Height scan
     # ---------------------------
     def _update_height_scan_obs(self):
-        hits_w = self._height_scanner.data.ray_hits_w
+        hits_w = self._height_scanner.data.ray_hits_w  # (N,R,3)
         hits_z = hits_w[..., 2]
         base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
-
         hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
-        rel = hits_z - base_z
-        rel = torch.clamp(rel, -1.0, 0.5)
+        rel = torch.clamp(hits_z - base_z, -1.0, 0.5)
 
         if rel.shape[1] != self._height_scan_obs.shape[1]:
             self._height_scan_obs = torch.zeros(self.num_envs, rel.shape[1], device=self.device)
         self._height_scan_obs[:] = rel
 
+    def _estimate_ground_z(self) -> torch.Tensor:
+        """Robust-ish local ground estimate from ray hits.
+        We use a low percentile to avoid 'seeing' the next stair step as the ground under the base.
+        """
+        hits_w = self._height_scanner.data.ray_hits_w
+        hits_z = hits_w[..., 2]
+        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
+        hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
+        # 20th percentile: reduces false base-height penalties on stair edges
+        return torch.quantile(hits_z, 0.2, dim=1)
+
+    # ---------------------------
+    # Observations
+    # ---------------------------
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
         self._update_height_scan_obs()
@@ -222,14 +219,12 @@ class Rob6323Go2Env(DirectRLEnv):
     # Rewards
     # ---------------------------
     def _get_rewards(self) -> torch.Tensor:
-        # tracking
         lin_vel_error = torch.sum(torch.square(self._commands[:, :2] - self.robot.data.root_lin_vel_b[:, :2]), dim=1)
         lin_vel_error_mapped = torch.exp(-lin_vel_error / 0.25)
 
         yaw_rate_error = torch.square(self._commands[:, 2] - self.robot.data.root_ang_vel_b[:, 2])
         yaw_rate_error_mapped = torch.exp(-yaw_rate_error / 0.25)
 
-        # action rate
         rew_action_rate = torch.sum(torch.square(self._actions - self.last_actions[:, :, 0]), dim=1) * (self.cfg.action_scale**2)
         rew_action_rate += torch.sum(
             torch.square(self._actions - 2 * self.last_actions[:, :, 0] + self.last_actions[:, :, 1]), dim=1
@@ -240,7 +235,6 @@ class Rob6323Go2Env(DirectRLEnv):
 
         rew_raibert_heuristic = self._reward_raibert_heuristic()
 
-        # stability
         pg = self.robot.data.projected_gravity_b
         lin = self.robot.data.root_lin_vel_b
         ang = self.robot.data.root_ang_vel_b
@@ -251,26 +245,22 @@ class Rob6323Go2Env(DirectRLEnv):
         rew_dof_vel = (qd ** 2).sum(dim=1)
         rew_ang_vel_xy = (ang[:, 0] ** 2 + ang[:, 1] ** 2)
 
-        # foot clearance (weakened)
+        # clearance
         foot_h = self.foot_positions_w[:, :, 2]
         swing_w = 1.0 - self.desired_contact_states
         clearance = float(self.cfg.feet_clearance_target_m)
         err = torch.clamp(clearance - foot_h, min=0.0)
         rew_feet_clearance = (swing_w * (err ** 2)).sum(dim=1)
 
-        # contact shaping (weakened)
+        # contact shaping
         forces_w = self._contact_sensor.data.net_forces_w[:, self._feet_ids_sensor, :]
         fmag = torch.linalg.norm(forces_w, dim=-1)
         contact_strength = torch.tanh(fmag / float(self.cfg.contact_force_scale))
         match = 1.0 - torch.abs(contact_strength - self.desired_contact_states)
         rew_track_contacts = match.mean(dim=1)
 
-        # base height relative to local ground (weak)
-        hits_w = self._height_scanner.data.ray_hits_w
-        hits_z = hits_w[..., 2]
-        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
-        hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
-        ground_z = torch.mean(hits_z, dim=1)
+        # base height relative to ground (weak)
+        ground_z = self._estimate_ground_z()
         base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
         rew_base_height = (base_h_rel - float(self.cfg.base_height_target_m)) ** 2
 
@@ -282,7 +272,7 @@ class Rob6323Go2Env(DirectRLEnv):
         else:
             rew_non_foot_contact = torch.zeros(self.num_envs, device=self.device)
 
-        # torque penalty
+        # torque
         tau = self._last_torques
         rew_torque = ((tau / self.torque_limits) ** 2).sum(dim=1)
 
@@ -311,18 +301,13 @@ class Rob6323Go2Env(DirectRLEnv):
     # Termination
     # ---------------------------
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # terrain-relative base height termination
-        hits_w = self._height_scanner.data.ray_hits_w
-        hits_z = hits_w[..., 2]
-        base_z = self.robot.data.root_pos_w[:, 2].unsqueeze(1)
-        hits_z = torch.where(torch.isfinite(hits_z), hits_z, base_z)
-        ground_z = torch.mean(hits_z, dim=1)
+        ground_z = self._estimate_ground_z()
         base_h_rel = self.robot.data.root_pos_w[:, 2] - ground_z
         cstr_base_height_min = base_h_rel < float(self.cfg.base_height_min)
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        net_contact_forces = self._contact_sensor.data.net_forces_w_history
+        net_contact_forces = self._contact_sensor.data.net_forces_w_history  # (N,H,B,3)
         base_force_mag_hist = torch.linalg.norm(net_contact_forces[:, :, int(self._base_id), :], dim=-1)
         cstr_termination_contacts = torch.any(base_force_mag_hist > 1.0, dim=1)
 
@@ -331,7 +316,7 @@ class Rob6323Go2Env(DirectRLEnv):
         return died, time_out
 
     # ---------------------------
-    # Reset + logging
+    # Reset
     # ---------------------------
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -354,15 +339,23 @@ class Rob6323Go2Env(DirectRLEnv):
         joint_pos = self.robot.data.default_joint_pos[env_ids]
         joint_vel = self.robot.data.default_joint_vel[env_ids]
         default_root_state = self.robot.data.default_root_state[env_ids]
+
+        # place robot at env origin + near the "edge" of the stairs tile so it climbs toward center
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        default_root_state[:, 0] += -3.0  # start "before" the pyramid center along -x
+        default_root_state[:, 2] += 0.10  # slight lift to avoid spawn intersections
+
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
+        self.last_actions[env_ids] = 0.0
+        self.gait_indices[env_ids] = 0.0
+        self.foot_indices[env_ids] = 0.0
+
         # logging
         self.extras.setdefault("log", {})
         self.extras.setdefault("episode", {})
-
         log_dict = {}
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
@@ -371,16 +364,10 @@ class Rob6323Go2Env(DirectRLEnv):
                 val = val / self.step_dt
             log_dict["Episode_Reward/" + key] = val
             self._episode_sums[key][env_ids] = 0.0
-
         log_dict["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         log_dict["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
-
         self.extras["log"].update(log_dict)
         self.extras["episode"].update(log_dict)
-
-        self.last_actions[env_ids] = 0.0
-        self.gait_indices[env_ids] = 0.0
-        self.foot_indices[env_ids] = 0.0
 
     # ---------------------------
     # Debug viz
