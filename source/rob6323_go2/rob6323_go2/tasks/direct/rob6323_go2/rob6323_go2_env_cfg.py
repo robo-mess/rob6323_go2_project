@@ -91,7 +91,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # scene (reduce env count if you hit OOM / instability)
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=2048, env_spacing=2.5, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=512, env_spacing=2.5, replicate_physics=True)
 
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
