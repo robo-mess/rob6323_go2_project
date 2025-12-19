@@ -185,6 +185,10 @@ class Rob6323Go2Env(DirectRLEnv):
             self._commands += alpha * (self._commands_target - self._commands)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        # clear per-step log at the start of the step (SAFE)
+        self.extras.setdefault("log", {})
+        self.extras.setdefault("episode", {})
+        self.extras["log"].clear()
         # update commands each step (slowly changing)
         self._update_commands()
 
@@ -381,6 +385,8 @@ class Rob6323Go2Env(DirectRLEnv):
         # Reset command timers + sample new target commands (smoothed commands start at 0)
         env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
 
+        log_dict = {}
+
         # ------------------------------------------------
         # Randomize actuator friction params for this episode
         # mu_v^E ~ U(0.0, 0.3), F_s^E ~ U(0.0, 2.5)
@@ -398,6 +404,16 @@ class Rob6323Go2Env(DirectRLEnv):
             (n,),
             self.device,
         )
+
+        # ---- friction randomization logging (proof for rubric) ----
+        log_dict["Randomization/mu_v_mean"] = mu_v_E.mean().item()
+        log_dict["Randomization/mu_v_min"]  = mu_v_E.min().item()
+        log_dict["Randomization/mu_v_max"]  = mu_v_E.max().item()
+
+        log_dict["Randomization/F_s_mean"] = F_s_E.mean().item()
+        log_dict["Randomization/F_s_min"]  = F_s_E.min().item()
+        log_dict["Randomization/F_s_max"]  = F_s_E.max().item()
+
 
         # broadcast the env-level draw to all 12 joints
         self._mu_v[env_ids_t] = mu_v_E.unsqueeze(1).repeat(1, 12)
@@ -423,7 +439,6 @@ class Rob6323Go2Env(DirectRLEnv):
         self.extras.setdefault("episode", {})
         self.extras["log"].clear()
 
-        log_dict = {}
 
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
