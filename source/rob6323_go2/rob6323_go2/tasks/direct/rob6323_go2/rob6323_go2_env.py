@@ -236,8 +236,7 @@ class Rob6323Go2Env(DirectRLEnv):
             ],
             dim=-1,
         )
-        self.extras.setdefault("log", {})
-        self.extras.setdefault("episodes", {})
+       
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
