@@ -12,79 +12,110 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
 from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.sensors import ContactSensorCfg
+from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
 from isaaclab.markers import VisualizationMarkersCfg
+from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.actuators import ImplicitActuatorCfg
+
+# Official rough terrain config (stable)
+from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
+
+
+def _grid_num_rays(size_xy: tuple[float, float], resolution: float) -> int:
+    nx = int(size_xy[0] / resolution) + 1
+    ny = int(size_xy[1] / resolution) + 1
+    return nx * ny
 
 
 @configclass
 class Rob6323Go2EnvCfg(DirectRLEnvCfg):
-    # env
+    # -----------------------------
+    # ENV
+    # -----------------------------
     decimation = 4
-    episode_length_s = 20.0
+    episode_length_s = 30.0  # longer so it traverses multiple patches
 
-    # spaces
     action_scale = 0.25
     action_space = 12
-    observation_space = 48 + 4  # Added 4 for clock inputs
+
+    # -----------------------------
+    # Height scanner
+    # -----------------------------
+    height_scan_size = (1.6, 1.0)
+    height_scan_resolution = 0.10
+    height_scan_num_rays = _grid_num_rays(height_scan_size, height_scan_resolution)
+
+    observation_space = 48 + 4 + height_scan_num_rays
     state_space = 0
 
-    # IMPORTANT: enable arrows for rubric video check
     debug_vis = True
 
-    base_height_min = 0.05  # Terminate if base is lower than this
+    # terminate if base too low relative to local ground
+    base_height_min = 0.12
 
     # -----------------------------
-    # Command following curric
+    # Commands (forward-only = no spin)
     # -----------------------------
-    command_resample_time_s = 2.0       # resample target commands every 2s
-    command_smoothing_tau_s = 0.25      # low-pass filter time constant (slow change)
+    command_resample_time_s = 2.0
+    command_smoothing_tau_s = 0.25
 
-    command_range_vx = (-1.0, 1.0)
-    command_range_vy = (-0.5, 0.5)
-    command_range_yaw = (-1.0, 1.0)
-
+    command_range_vx = (0.4, 0.8)
+    command_range_vy = (0.0, 0.0)
+    command_range_yaw = (0.0, 0.0)
 
     # -----------------------------
-    # New skill: bipedal locomotion on hind legs (bonus task)
+    # Spawn behavior (IMPORTANT)
+    # - start near the beginning of the 4-tile strip
+    # - randomize XY so start isn't identical every reset
     # -----------------------------
-    # Keep this False to train the original quadruped locomotion.
-    enable_bipedal_skill = False
+    terrain_tile_size = 8.0
+    terrain_num_rows = 4   # 4 tiles in +x (progression)
+    terrain_num_cols = 1
 
-    # In bipedal mode we command forward speed + yaw-rate only (vy forced to 0).
-    bipedal_command_resample_time_s = 10.0
-    bipedal_command_range_vx = (-0.30, 0.30)
-    bipedal_command_range_vy = (0.0, 0.0)
-    bipedal_command_range_yaw = (-1.0, 1.0)
-    bipedal_command_vx_bin = 0.10
+    # Put spawn near the "left" side of the strip (approx)
+    spawn_base_x = -0.5 * terrain_num_rows * terrain_tile_size + 1.5
+    spawn_base_y = 0.0
 
-    # Safety termination: after a short grace period, terminate if front feet hit the ground hard.
-    bipedal_grace_steps = 30
-    bipedal_front_contact_force_threshold = 25.0  # N
+    # Randomization (per reset)
+    spawn_xy_jitter = 0.5     # +/- meters
+    spawn_yaw_jitter = 0.15   # +/- radians (small)
 
-    # Shaping targets for bipedal standing
-    bipedal_height_min_m = 0.33
-    bipedal_height_max_m = 0.65
-    bipedal_front_feet_min_height_m = 0.12
-
-    # Bipedal shaping reward scales (additive). Set to 0 to disable any term.
-    bipedal_lift_reward_scale = 0.8
-    bipedal_upright_reward_scale = 0.6
-    bipedal_front_air_reward_scale = -6.0
-    bipedal_front_contact_penalty_scale = -1.5
-
-    # PD control gains
+    # PD
     Kp = 20.0
     Kd = 0.5
-
-    # IMPORTANT: match actuator effort_limit (prevents mismatched clipping/penalty)
     torque_limits = 23.5
 
-    sim: SimulationCfg = SimulationCfg(dt=0.005, render_interval=decimation)
+    # -----------------------------
+    # SIM
+    # -----------------------------
+    sim: SimulationCfg = SimulationCfg(
+        dt=1 / 200,
+        render_interval=decimation,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
+        ),
+    )
 
+    # -----------------------------
+    # Terrain: official ROUGH_TERRAINS_CFG,
+    # but stretched into a 4x1 strip so one robot walks across
+    # multiple terrain patches in one episode.
+    # -----------------------------
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
-        terrain_type="plane",
+        terrain_type="generator",
+        terrain_generator=ROUGH_TERRAINS_CFG.replace(
+            # make a strip of tiles
+            size=(terrain_tile_size, terrain_tile_size),
+            num_rows=terrain_num_rows,
+            num_cols=terrain_num_cols,
+            curriculum=False,     # fixed layout, no curriculum
+            seed=0,
+        ),
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -96,10 +127,11 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
-    # robot(s)
+    # -----------------------------
+    # Robot
+    # -----------------------------
     robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
-    # disable implicit actuator gains (so your explicit PD is in control)
     robot_cfg.actuators["base_legs"] = ImplicitActuatorCfg(
         joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
         effort_limit=23.5,
@@ -108,55 +140,67 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         damping=0.0,
     )
 
-    # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=512, env_spacing=4.0, replicate_physics=True)
+    # -----------------------------
+    # Scene (KEEP SMALL for debugging)
+    # -----------------------------
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=1,          # <<< small so you can verify it works
+        env_spacing=4.0,
+        replicate_physics=True,
+    )
 
     contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/.*",
         history_length=3,
         update_period=0.005,
+        track_air_time=True,
     )
 
-    # debug arrows / markers (rubric)
-    marker_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
-        prim_path="/Visuals/Markers",
-        markers={
-            "command": sim_utils.MarkerCfg(
-                prim_path="/Visuals/Markers/command",
-                usd_path="path/to/arrow.usd",
-                scale=(0.2, 0.2, 0.2),
-            ),
-            "heading": sim_utils.MarkerCfg(
-                prim_path="/Visuals/Markers/heading",
-                usd_path="path/to/arrow.usd",
-                scale=(0.2, 0.2, 0.2),
-            ),
-        },
+    # Height scanner
+    height_scanner_cfg: RayCasterCfg = RayCasterCfg(
+        prim_path="/World/envs/env_.*/Robot/base",
+        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.6)),
+        ray_alignment="yaw",
+        pattern_cfg=patterns.GridPatternCfg(
+            resolution=height_scan_resolution,
+            size=list(height_scan_size),
+        ),
+        debug_vis=False,
+        mesh_prim_paths=["/World/ground"],
     )
 
-    # reward scales
-    lin_vel_reward_scale = 1.0
-    yaw_rate_reward_scale = 0.5
-    action_rate_reward_scale = -0.01
-    raibert_heuristic_reward_scale = -0.05
+    # Arrows
+    goal_vel_visualizer_cfg: VisualizationMarkersCfg = GREEN_ARROW_X_MARKER_CFG.replace(
+        prim_path="/Visuals/Command/velocity_goal"
+    )
+    current_vel_visualizer_cfg: VisualizationMarkersCfg = BLUE_ARROW_X_MARKER_CFG.replace(
+        prim_path="/Visuals/Command/velocity_current"
+    )
+    goal_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
+    current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
 
-    # Part 5
-    orient_reward_scale = -1.0
-    lin_vel_z_reward_scale = -2.0
-    dof_vel_reward_scale = -0.0001
-    ang_vel_xy_reward_scale = -0.001
+    # -----------------------------
+    # Rewards (tuned to actually move forward)
+    # -----------------------------
+    lin_vel_reward_scale = 8.0
+    yaw_rate_reward_scale = 0.0
 
-    # Part 6 shaping constants
-    feet_clearance_target_m = 0.08
+    action_rate_reward_scale = -0.05
+    raibert_heuristic_reward_scale = -1.0
+
+    orient_reward_scale = -2.0
+    lin_vel_z_reward_scale = -0.5
+    dof_vel_reward_scale = -0.00005
+    ang_vel_xy_reward_scale = -0.02
+
+    feet_clearance_target_m = 0.06
+    feet_clearance_reward_scale = -5.0
+
+    tracking_contacts_shaped_force_reward_scale = 1.0
     contact_force_scale = 50.0
 
-    feet_clearance_reward_scale = -0.2
-    tracking_contacts_shaped_force_reward_scale = 0.5
-
-    # base height + collision avoidance
     base_height_target_m = 0.32
-    base_height_reward_scale = -20.0
-    non_foot_contact_reward_scale = -2.0
+    base_height_reward_scale = -2.0
+    non_foot_contact_reward_scale = -1.0
 
-    # torque regularization (rubric wants tiny scale)
     torque_reward_scale = -1.0e-4
