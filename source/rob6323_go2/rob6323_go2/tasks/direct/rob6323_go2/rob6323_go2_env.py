@@ -239,12 +239,6 @@ class Rob6323Go2Env(DirectRLEnv):
             dim=-1,
         )
 
-        # keep episodic logs written during reset; refresh per-step logs
-        if not hasattr(self, "extras") or self.extras is None:
-            self.extras = {}
-        self.extras.setdefault("episode", {})
-        self.extras["log"] = {}
-
        
         return {"policy": obs}
 
@@ -427,6 +421,7 @@ class Rob6323Go2Env(DirectRLEnv):
         # ----------------------------
         self.extras.setdefault("log", {})
         self.extras.setdefault("episode", {})
+        self.extras["log"].clear()
 
         log_dict = {}
 
