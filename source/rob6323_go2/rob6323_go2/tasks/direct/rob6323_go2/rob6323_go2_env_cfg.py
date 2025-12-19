@@ -28,7 +28,14 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     # spaces
     action_scale = 0.25
     action_space = 12
-    observation_space = 48 + 4  # Added 4 for clock inputs
+    # Observation (policy) = [
+    #   root_lin_vel_b(3), root_ang_vel_b(3), projected_gravity_b(3),
+    #   commands vx,vy,yaw(3),
+    #   joint_pos_err(12), joint_vel(12),
+    #   actions(12),
+    #   gait clock_inputs(4)
+    # ] = 48 + 4
+    observation_space = 48 + 4  
     state_space = 0
 
     # IMPORTANT: enable arrows for rubric video check
