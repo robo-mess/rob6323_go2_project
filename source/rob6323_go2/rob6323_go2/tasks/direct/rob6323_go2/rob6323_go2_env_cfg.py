@@ -11,79 +11,58 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.utils import configclass
-from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
+from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg
+from isaaclab.terrains.height_field import HfRandomUniformTerrainCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
-from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 
-# Official rough terrain config (stable import)
-from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG
-
-
-def _grid_num_rays(size_xy: tuple[float, float], resolution: float) -> int:
-    nx = int(size_xy[0] / resolution) + 1
-    ny = int(size_xy[1] / resolution) + 1
-    return nx * ny
+# -----------------------------------------------------------------------------
+# Marker configs (from IsaacLab defaults)
+# -----------------------------------------------------------------------------
+from isaaclab.markers import RED_ARROW_X_MARKER_CFG, BLUE_ARROW_X_MARKER_CFG
 
 
 @configclass
 class Rob6323Go2EnvCfg(DirectRLEnvCfg):
-    # env
-    decimation = 4
-    episode_length_s = 30.0
+    """Configuration for ROB6323 Go2 direct RL environment."""
 
-    # spaces
-    action_scale = 0.50          # more authority => easier to move
-    action_space = 12
-
-    # height scanner settings (perceptive locomotion)
-    height_scan_size = (1.6, 1.0)
-    height_scan_resolution = 0.10
-    height_scan_num_rays = _grid_num_rays(height_scan_size, height_scan_resolution)
-
-    # base obs(48) + clock(4) + height_scan
-    observation_space = 48 + 4 + height_scan_num_rays
-    state_space = 0
-
-    # visualize arrows
-    debug_vis = True
-
-    # keep termination simple (avoid “kills” on rough early learning)
-    base_height_min = 0.05
-
-    # Commands: FORWARD ONLY so it doesn't spin
-    command_resample_time_s = 2.0
-    command_smoothing_tau_s = 0.25
-    command_range_vx = (0.5, 0.9)
-    command_range_vy = (0.0, 0.0)
-    command_range_yaw = (0.0, 0.0)
-
-    # Spawn jitter (not same start each episode)
-    spawn_xy_jitter = 0.5
-    spawn_yaw_jitter = 0.0   # keep 0 so arrows don’t “rotate forever”
-
+    # -----------------------------
     # simulation
+    # -----------------------------
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 200,
-        render_interval=decimation,
+        render_interval=4,
+        disable_contact_processing=False,
         physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=1.0,
             restitution=0.0,
         ),
     )
 
-    # ONE TYPE of terrain (rough), fixed seed, fixed init level
+    # -----------------------------
+    # scene
+    # -----------------------------
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=4.0, replicate_physics=True)
+
+    # -----------------------------
+    # termination / safety
+    # -----------------------------
+    base_height_min = 0.05  # Terminate if base is lower than this
+
+    # -----------------------------
+    # robot
+    # -----------------------------
+    robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+
+    # -----------------------------
+    # terrain (UNEVENTERRAIN: single style, randomized tiles)
+    # -----------------------------
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="generator",
-        terrain_generator=ROUGH_TERRAINS_CFG(
-            curriculum=False,
-            seed=0,
-        ),
-        max_init_terrain_level=9,   # fixed difficulty; single env => one surface
+        # For generator terrains, env origins come from terrain tile origins (one tile per env below).
+        use_terrain_origins=True,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -92,69 +71,106 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
             dynamic_friction=1.0,
             restitution=0.0,
         ),
-        debug_vis=False,
-    )
-
-    # robot
-    robot_cfg: ArticulationCfg = UNITREE_GO2_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-
-    # scene (LOW for debugging)
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=1,
-        env_spacing=4.0,
-        replicate_physics=True,
-    )
-
-    contact_sensor: ContactSensorCfg = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Robot/.*",
-        history_length=3,
-        update_period=0.005,
-        track_air_time=True,
-    )
-
-    # height scanner
-    height_scanner_cfg: RayCasterCfg = RayCasterCfg(
-        prim_path="/World/envs/env_.*/Robot/base",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.6)),
-        ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(
-            resolution=height_scan_resolution,
-            size=list(height_scan_size),
+        # One terrain "style" (random uniform roughness), but many different tiles (different difficulty/seed per tile).
+        terrain_generator=TerrainGeneratorCfg(
+            # Each tile is 4m x 4m so each env has its own patch (matches env_spacing=4.0).
+            size=(4.0, 4.0),
+            num_rows=64,
+            num_cols=64,
+            curriculum=False,
+            # Keep difficulty mild to avoid early training collapse, but still uneven.
+            difficulty_range=(0.0, 0.6),
+            horizontal_scale=0.1,
+            vertical_scale=0.005,
+            slope_threshold=0.75,
+            # Terrain type dictionary: keep ONE terrain type, but randomize its parameters via difficulty.
+            sub_terrains={
+                "rough_uniform": HfRandomUniformTerrainCfg(
+                    proportion=1.0,
+                    # Peak-to-peak roughness is modest (few cm) so rewards/termination from flat-ground tutorial stay stable.
+                    noise_range=(-0.04, 0.04),
+                    noise_step=0.01,
+                    downsampled_scale=0.5,
+                ),
+            },
+            # Deterministic terrain generation across runs (training reproducibility)
+            seed=0,
+            use_cache=True,
         ),
         debug_vis=False,
-        mesh_prim_paths=["/World/ground"],
     )
 
-    # arrows
-    goal_vel_visualizer_cfg: VisualizationMarkersCfg = GREEN_ARROW_X_MARKER_CFG.replace(
+    # robot(s)
+    robot: ArticulationCfg = robot_cfg
+
+    # -----------------------------
+    # contact sensor
+    # -----------------------------
+    contact_sensor: ContactSensorCfg = ContactSensorCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/.*",
+        history_length=1,
+        track_air_time=True,
+        debug_vis=False,
+    )
+
+    # -----------------------------
+    # command ranges + smoothing
+    # -----------------------------
+    command_range_vx = (-1.0, 1.0)
+    command_range_vy = (-0.5, 0.5)
+    command_range_yaw = (-1.0, 1.0)
+    command_resample_time_s = 4.0
+    command_smoothing_tau_s = 0.5
+
+    # -----------------------------
+    # episode settings
+    # -----------------------------
+    episode_length_s = 20.0
+
+    # -----------------------------
+    # visualization markers
+    # -----------------------------
+    goal_vel_visualizer_cfg: VisualizationMarkersCfg = RED_ARROW_X_MARKER_CFG.replace(
         prim_path="/Visuals/Command/velocity_goal"
     )
     current_vel_visualizer_cfg: VisualizationMarkersCfg = BLUE_ARROW_X_MARKER_CFG.replace(
         prim_path="/Visuals/Command/velocity_current"
     )
+
     goal_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
     current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
 
-    # Rewards: make “move forward” the easiest thing to learn
-    lin_vel_reward_scale = 10.0
-    yaw_rate_reward_scale = 0.0
+    # -----------------------------
+    # reward scales
+    # -----------------------------
+    lin_vel_reward_scale = 1.0
+    yaw_rate_reward_scale = 0.5
 
-    # smoothness (light)
-    action_rate_reward_scale = -0.02
+    # Part 2 gait shaping
+    foot_clearance_reward_scale = 0.4
+    foot_slip_reward_scale = -0.25
+    feet_air_time_reward_scale = 0.25
 
-    # stability (light early so it doesn’t freeze)
-    orient_reward_scale = -1.0
-    lin_vel_z_reward_scale = -0.2
-    dof_vel_reward_scale = -0.00002
-    ang_vel_xy_reward_scale = -0.01
+    # Part 3 gait symmetry
+    symmetry_reward_scale = 0.25
 
-    # shaping (very light)
-    raibert_heuristic_reward_scale = -0.5
-    feet_clearance_target_m = 0.06
-    feet_clearance_reward_scale = -2.0
-    tracking_contacts_shaped_force_reward_scale = 0.5
+    # Part 4 contact tracking (Raibert heuristic)
+    tracking_contacts_shaped_force_reward_scale = 4.0
+
+    # Part 5 stability penalties
+    orient_reward_scale = -5.0
+    lin_vel_z_reward_scale = -0.02
+    dof_vel_reward_scale = -0.0001
+    ang_vel_xy_reward_scale = -0.001
+
+    # Part 6 shaping constants
+    feet_clearance_target_m = 0.08
     contact_force_scale = 50.0
 
+    # base height + collision avoidance
     base_height_target_m = 0.32
-    base_height_reward_scale = -1.0
-    non_foot_contact_reward_scale = -0.5
+    base_height_reward_scale = -20.0
+    non_foot_contact_reward_scale = -2.0
+
+    # torque regularization (rubric wants tiny scale)
+    torque_reward_scale = -1.0e-4
