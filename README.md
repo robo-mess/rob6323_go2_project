@@ -215,6 +215,6 @@ Episode terminates early if:
 ### Setup on Greene
 ```bash
 cd $HOME
-git clone  rob6323_go2_project
+git clone git@github.com:robo-mess/rob6323_go2_project.git rob6323_go2_project
 cd $HOME/rob6323_go2_project
 ./install.sh
