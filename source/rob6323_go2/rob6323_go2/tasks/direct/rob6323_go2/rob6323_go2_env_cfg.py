@@ -79,7 +79,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="generator",
-        terrain_generator=ROUGH_TERRAINS_CFG.replace(
+        terrain_generator=ROUGH_TERRAINS_CFG(
             curriculum=False,
             seed=0,
         ),
