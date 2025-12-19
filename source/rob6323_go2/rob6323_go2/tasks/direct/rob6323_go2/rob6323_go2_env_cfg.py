@@ -25,6 +25,8 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     decimation = 4
     episode_length_s = 20.0
 
+    seed = 21  # submission seed (documented in README)
+
     # spaces
     action_scale = 0.25
     action_space = 12
