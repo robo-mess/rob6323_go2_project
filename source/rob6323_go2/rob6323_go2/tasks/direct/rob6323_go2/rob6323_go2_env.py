@@ -128,6 +128,11 @@ class Rob6323Go2Env(DirectRLEnv):
         # Variables needed for the raibert heuristic
         self.gait_indices = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.clock_inputs = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
+        # termination reason buffers (must exist before first reset)
+        self._term_base_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._term_upside_down  = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._term_base_height  = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
         self.desired_contact_states = torch.zeros(
             self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False
         )
