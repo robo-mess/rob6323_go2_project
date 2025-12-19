@@ -116,6 +116,8 @@ class Rob6323Go2Env(DirectRLEnv):
             self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False
         )
 
+        self.extras = {"log": {}, "episode": {}}
+
     @property
     def foot_positions_w(self) -> torch.Tensor:
         """Returns the feet positions in the world frame.
@@ -214,7 +216,6 @@ class Rob6323Go2Env(DirectRLEnv):
             ],
             dim=-1,
         )
-        self.extras = {}
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
