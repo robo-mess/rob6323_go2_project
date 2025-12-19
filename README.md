@@ -166,6 +166,12 @@ The suggested way to inspect these logs is via the Open OnDemand web interface:
 ---
 Students should only edit README.md below this line.
 
+## Submission info
+- **Submitted seed:** 21 
+- **Where seed is set:** `Rob6323Go2EnvCfg.seed = 21` in  
+  `source/rob6323_go2/rob6323_go2/tasks/direct/rob6323_go2/rob6323_go2_env_cfg.py`
+
+  
 ## Branches in this fork
 - `master`: Merged till bonus 1 (friction) 
 - `tutorial`: tutorial parts 1–4 implemented (gait improvements baseline)
@@ -204,3 +210,11 @@ Episode terminates early if:
 - Randomized μ_v ~ U(0.0, 0.3), F_s ~ U(0.0, 2.5) per-episode in `_reset_idx()`
 - Logged randomization stats to TensorBoard keys: `Randomization/*`
 
+
+## Reproduction steps (exact commands)
+### Setup on Greene
+```bash
+cd $HOME
+git clone  rob6323_go2_project
+cd $HOME/rob6323_go2_project
+./install.sh
