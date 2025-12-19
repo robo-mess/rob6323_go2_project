@@ -24,6 +24,15 @@ from .rob6323_go2_env_cfg import Rob6323Go2EnvCfg
 class Rob6323Go2Env(DirectRLEnv):
     cfg: Rob6323Go2EnvCfg
 
+    # =============================================================================
+    # Key changes:
+    # - Command smoothing + resampling: _update_commands()
+    # - Reward shaping: _get_rewards() (stability, clearance, contacts, torque)
+    # - Terminations: _get_dones() (base contact, base height, upside-down)
+    # - Bonus friction model + per-episode randomization: _apply_action(), _reset_idx()
+    # See README for rationale + reproduction commands/seeds.
+    # =============================================================================
+
     def __init__(self, cfg: Rob6323Go2EnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
@@ -279,10 +288,10 @@ class Rob6323Go2Env(DirectRLEnv):
         ang = self.robot.data.root_ang_vel_b              # (N,3)
         qd  = self.robot.data.joint_vel                   # (N,12)
 
-        rew_orient     = (pg[:, 0] ** 2 + pg[:, 1] ** 2)
-        rew_lin_vel_z  = (lin[:, 2] ** 2)
-        rew_dof_vel    = (qd ** 2).sum(dim=1)
-        rew_ang_vel_xy = (ang[:, 0] ** 2 + ang[:, 1] ** 2)
+        rew_orient     = (pg[:, 0] ** 2 + pg[:, 1] ** 2)     # penalize roll/pitch via projected gravity x/y
+        rew_lin_vel_z  = (lin[:, 2] ** 2)                    # penalize bouncing
+        rew_dof_vel    = (qd ** 2).sum(dim=1)                # penalize knee/hip contacts
+        rew_ang_vel_xy = (ang[:, 0] ** 2 + ang[:, 1] ** 2)   # small torque magnitude regularizer (rubric)
 
         # ============================================================
         # Part 6: foot clearance + contact shaping
@@ -323,7 +332,7 @@ class Rob6323Go2Env(DirectRLEnv):
         rew_torque = ((tau / self.torque_limits) ** 2).sum(dim=1)
 
         # ----------------------------
-        # final rewards dict (IMPORTANT: * step_dt)
+        # final rewards dict 
         # ----------------------------
         rewards = {
             "track_lin_vel_xy_exp": lin_vel_error_mapped * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -364,6 +373,9 @@ class Rob6323Go2Env(DirectRLEnv):
         cstr_termination_contacts = torch.any(base_force_mag_hist > 1.0, dim=1)
 
         cstr_upsidedown = self.robot.data.projected_gravity_b[:, 2] > 0
+        self._term_base_contact = cstr_termination_contacts
+        self._term_upside_down  = cstr_upsidedown
+        self._term_base_height  = cstr_base_height_min
         died = cstr_termination_contacts | cstr_upsidedown | cstr_base_height_min
         return died, time_out
 
@@ -432,9 +444,9 @@ class Rob6323Go2Env(DirectRLEnv):
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        # ----------------------------
-        # Logging (clean + rubric-friendly)
-        # ----------------------------
+        # ------------
+        # Logging 
+        # ------------
         self.extras.setdefault("log", {})
         self.extras.setdefault("episode", {})
         self.extras["log"].clear()
@@ -443,10 +455,10 @@ class Rob6323Go2Env(DirectRLEnv):
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
 
-            # your episode sums already include step_dt, so divide by episode seconds
+            # episode sums already include step_dt, so divide by episode seconds
             val = episodic_sum_avg / self.max_episode_length_s
 
-            # IMPORTANT: rubric expects ~48 and ~24 when not changing scales.
+            
             # Rescale ONLY the logged value back to "per-step" convention:
             if key in ("track_lin_vel_xy_exp", "track_ang_vel_z_exp"):
                 val = val / self.step_dt
@@ -455,7 +467,9 @@ class Rob6323Go2Env(DirectRLEnv):
             self._episode_sums[key][env_ids] = 0.0
 
         # termination counts
-        log_dict["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        log_dict["Episode_Termination/base_contact"] = torch.count_nonzero(self._term_base_contact[env_ids]).item()
+        log_dict["Episode_Termination/upside_down"]  = torch.count_nonzero(self._term_upside_down[env_ids]).item()
+        log_dict["Episode_Termination/base_height"]  = torch.count_nonzero(self._term_base_height[env_ids]).item()
         log_dict["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
 
         self.extras["log"].update(log_dict)
