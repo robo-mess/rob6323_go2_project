@@ -17,8 +17,8 @@ from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.actuators import ImplicitActuatorCfg
 
-# Mesh stairs (looks like real steps)
-from isaaclab.terrains.trimesh.mesh_terrains_cfg import MeshPyramidStairsTerrainCfg
+# Heightfield stairs (very likely present in your setup)
+from isaaclab.terrains.height_field.hf_terrains_cfg import HfPyramidStairsTerrainCfg
 
 
 @configclass
@@ -31,19 +31,20 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
 
     action_scale = 0.25
     action_space = 12
-    observation_space = 48 + 4  # base obs + gait clock
+    observation_space = 48 + 4  # base obs + clock
     state_space = 0
 
     debug_vis = True
 
-    # Spawn “before” the stairs pyramid center (in +x direction)
+    # Spawn before stairs (walk +x)
     spawn_offset_x = -3.0
+    spawn_lift_z = 0.08
 
-    # Terminate if base too low (simple safeguard)
+    # termination safeguard
     base_height_min = 0.10
 
     # -----------------------------
-    # COMMANDS (forward-only so they traverse stairs)
+    # COMMANDS (FORWARD ONLY)
     # -----------------------------
     command_resample_time_s = 2.0
     command_smoothing_tau_s = 0.25
@@ -73,24 +74,23 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # -----------------------------
-    # MANY ENVS (many bots) — IMPORTANT:
-    # num_rows * num_cols MUST be >= num_envs
+    # MANY BOTS (match tiles!)
     # -----------------------------
-    num_envs = 64        # change to 256 later if you want (but start with 64 for video)
+    # Start with 64 like the picture-ish. If you want 256, set rows=16, cols=16, num_envs=256.
+    num_envs = 64
     grid_rows = 8
-    grid_cols = 8        # 8*8 = 64
+    grid_cols = 8
 
-    # Stairs tile size (meters). Bigger tile => longer climb
-    tile_size = 8.0
+    tile_size = 8.0  # meters per tile
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=num_envs,
-        env_spacing=tile_size,  # keep spacing >= tile_size so tiles don't overlap
+        env_spacing=tile_size,     # spacing >= tile size
         replicate_physics=True,
     )
 
     # -----------------------------
-    # TERRAIN: STAIRS ONLY with MANY STEPS
+    # TERRAIN: STAIRS ONLY (MANY STEPS)
     # -----------------------------
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
@@ -107,23 +107,21 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
         terrain_generator=TerrainGeneratorCfg(
             seed=0,
             curriculum=False,
-            # size per tile:
             size=(tile_size, tile_size),
             num_rows=grid_rows,
             num_cols=grid_cols,
+            horizontal_scale=0.10,
+            vertical_scale=0.005,
             slope_threshold=0.75,
             sub_terrains={
-                "stairs": MeshPyramidStairsTerrainCfg(
+                "stairs": HfPyramidStairsTerrainCfg(
                     proportion=1.0,
-                    size=(tile_size, tile_size),
-                    border_width=0.25,
-                    # ↓ smaller step_width => more steps (what you want)
+                    # ↓ small width => MORE steps
                     step_width=0.15,
-                    # keep height easy enough to learn
-                    step_height_range=(0.05, 0.07),
-                    # smaller platform = longer staircase visible
+                    # keep easy to climb
+                    step_height_range=(0.04, 0.06),
+                    # smaller platform => longer visible stairs
                     platform_width=0.8,
-                    holes=False,
                 ),
             },
         ),
@@ -150,7 +148,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     )
 
     # -----------------------------
-    # VISUAL ARROWS
+    # ARROWS
     # -----------------------------
     goal_vel_visualizer_cfg: VisualizationMarkersCfg = GREEN_ARROW_X_MARKER_CFG.replace(
         prim_path="/Visuals/Command/velocity_goal"
@@ -162,7 +160,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
 
     # -----------------------------
-    # REWARDS (keep your option-2 structure)
+    # REWARDS (your option-2 structure)
     # -----------------------------
     lin_vel_reward_scale = 1.0
     yaw_rate_reward_scale = 0.5
