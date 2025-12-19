@@ -165,3 +165,42 @@ The suggested way to inspect these logs is via the Open OnDemand web interface:
 
 ---
 Students should only edit README.md below this line.
+
+## Branches in this fork
+- `master`: Merged till bonus 1 (friction) 
+- `tutorial`: tutorial parts 1–4 implemented (gait improvements baseline)
+- `improvements`: reward shaping + terminations + command smoothing for gait quality
+- `friction`: bonus 1 (actuator friction model + per-episode randomization)
+- `bonus`: bonus 2 new skill 
+
+## Files modified
+All project changes are in:
+- `source/rob6323_go2/rob6323_go2/tasks/direct/rob6323_go2/rob6323_go2_env.py`
+- `source/rob6323_go2/rob6323_go2/tasks/direct/rob6323_go2/rob6323_go2_env_cfg.py`
+
+## Major changes (what + why)
+### 1) Command smoothing + resampling (better command-following stability)
+- Added slow command changes using a low-pass filter (`command_smoothing_tau_s`) and periodic resampling (`command_resample_time_s`).
+- Why: to make velocity tracking smoother and more stable when commands change over time.
+
+### 2) Reward shaping for gait quality + stability
+Implemented/activated these reward terms (all logged under `Episode_Reward/*`):
+- **Action smoothness**: action-rate penalty using history buffer (`last_actions`).
+- **Raibert heuristic**: encourages coordinated stepping / reduces foot placement error.
+- **Base stability**: penalties on projected gravity tilt, vertical velocity, joint velocity, and roll/pitch angular velocity.
+- **Foot clearance**: penalize swing feet that don’t reach target clearance.
+- **Contact shaping**: match desired contact schedule with shaped contact force.
+- **Base height + collision avoidance**: penalize deviation from nominal height and penalize non-foot contacts (knees/hips/thigh/calf).
+- **Torque regularization**: small ∥τ∥ penalty (scale ~ -1e-4 per rubric).
+
+### 3) Termination conditions (clean resets when the robot fails)
+Episode terminates early if:
+- base contacts the ground (contact sensor force threshold),
+- robot is upside down (projected gravity),
+- base height drops below minimum.
+
+### 4) Bonus 1: Actuator friction model + randomization (sim-to-real robustness)
+- Implemented friction torque: τ = τ_PD − (F_s * tanh(qdot/0.1) + μ_v * qdot)
+- Randomized μ_v ~ U(0.0, 0.3), F_s ~ U(0.0, 2.5) per-episode in `_reset_idx()`
+- Logged randomization stats to TensorBoard keys: `Randomization/*`
+
