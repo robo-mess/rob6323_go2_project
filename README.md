@@ -167,17 +167,20 @@ The suggested way to inspect these logs is via the Open OnDemand web interface:
 Students should only edit README.md below this line.
 
 ## Submission info
-- **Submitted seed:** 21 
+- **Submitted seed:** 21
 - **Where seed is set:** `Rob6323Go2EnvCfg.seed = 21` in  
   `source/rob6323_go2/rob6323_go2/tasks/direct/rob6323_go2/rob6323_go2_env_cfg.py`
 
-  
+- **Main submission branch (Parts 1–5 + Bonus 1):** `master`
+- **Bonus 2 (Uneven Terrain) branch:** `bonus`  
+  *(Kept separate on purpose to isolate changes; not merged into `master`.)*
+
 ## Branches in this fork
-- `master`: Merged till bonus 1 (friction) 
-- `tutorial`: tutorial parts 1–4 implemented (gait improvements baseline)
-- `improvements`: reward shaping + terminations + command smoothing for gait quality
-- `friction`: bonus 1 (actuator friction model + per-episode randomization)
-- `bonus`: bonus 2 new skill 
+- `master`: tutorial parts 1–5 + Bonus 1 (actuator friction randomization)
+- `tutorial`: tutorial parts 1–4 implemented (baseline gait improvements)
+- `improvements`: reward shaping + terminations + command smoothing
+- `friction`: Bonus 1 (actuator friction model + per-episode randomization)
+- `bonus`: Bonus 2 (uneven terrain training via terrain generator)
 
 ## Files modified
 All project changes are in:
@@ -185,6 +188,7 @@ All project changes are in:
 - `source/rob6323_go2/rob6323_go2/tasks/direct/rob6323_go2/rob6323_go2_env_cfg.py`
 
 ## Major changes (what + why)
+
 ### 1) Command smoothing + resampling (better command-following stability)
 - Added slow command changes using a low-pass filter (`command_smoothing_tau_s`) and periodic resampling (`command_resample_time_s`).
 - Why: to make velocity tracking smoother and more stable when commands change over time.
@@ -210,8 +214,12 @@ Episode terminates early if:
 - Randomized μ_v ~ U(0.0, 0.3), F_s ~ U(0.0, 2.5) per-episode in `_reset_idx()`
 - Logged randomization stats to TensorBoard keys: `Randomization/*`
 
+### 5) Bonus 2: Uneven terrain locomotion (terrain generator + curriculum)
+- Switched from flat plane terrain to IsaacLab terrain generator using rough terrain config + curriculum.
+- Kept the change isolated on branch `bonus` so the main submission remains clean.
 
 ## Reproduction steps (exact commands)
+
 ### Setup on Greene
 ```bash
 cd $HOME
