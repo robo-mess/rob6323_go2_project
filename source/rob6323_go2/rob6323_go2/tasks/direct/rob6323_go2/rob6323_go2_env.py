@@ -402,15 +402,17 @@ class Rob6323Go2Env(DirectRLEnv):
             base_h = base_z - ground_z
         else:
             base_h = base_z
-            
-        cstr_base_height_min = base_height < self.cfg.base_height_min
+
+        cstr_base_height_min = base_h < float(self.cfg.base_height_min)
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
         net_contact_forces = self._contact_sensor.data.net_forces_w_history  # (N,H,B,3)
         base_id = int(self._base_id)
 
         base_force_mag_hist = torch.linalg.norm(net_contact_forces[:, :, base_id, :], dim=-1)  # (N,H)
-        cstr_termination_contacts = torch.any(base_force_mag_hist > 1.0, dim=1)
+        thr = float(getattr(self.cfg, "termination_base_contact_force", 25.0))
+        cstr_termination_contacts = torch.any(base_force_mag_hist > thr, dim=1)
+
 
         cstr_upsidedown = self.robot.data.projected_gravity_b[:, 2] > 0
         self._term_base_contact = cstr_termination_contacts
