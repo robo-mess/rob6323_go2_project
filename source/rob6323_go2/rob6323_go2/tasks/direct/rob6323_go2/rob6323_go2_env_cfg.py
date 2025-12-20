@@ -16,6 +16,7 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.markers.config import BLUE_ARROW_X_MARKER_CFG, GREEN_ARROW_X_MARKER_CFG
 from isaaclab.terrains.config.rough import ROUGH_TERRAINS_CFG 
+from isaaclab.envs import ViewerCfg
 
 from isaaclab.actuators import ImplicitActuatorCfg
 
@@ -43,6 +44,14 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     debug_vis = True
 
     base_height_min = 0.05  # Terminate if base is lower than this
+
+    viewer = ViewerCfg(
+        origin_type="env",
+        env_index=0,              # lock camera to env 0
+        eye=(6.0, 6.0, 4.0),      # camera position
+        lookat=(0.0, 0.0, 0.4),   # look at robot height
+    )
+
 
     # -----------------------------
     # Command following curriculum
