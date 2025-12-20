@@ -226,3 +226,15 @@ cd $HOME
 git clone git@github.com:robo-mess/rob6323_go2_project.git rob6323_go2_project
 cd $HOME/rob6323_go2_project
 ./install.sh
+
+### Main submission (master)
+```bash
+cd $HOME/rob6323_go2_project
+git checkout master
+./train.sh
+
+### Bonus 2 uneven terrain
+```bash
+cd $HOME/rob6323_go2_project
+git checkout bonus
+./train.sh
