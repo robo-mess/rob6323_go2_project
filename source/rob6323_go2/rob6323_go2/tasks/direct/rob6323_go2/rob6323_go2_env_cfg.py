@@ -162,7 +162,7 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
 
     # base height + collision avoidance
     base_height_target_m = 0.32
-    base_height_reward_scale = -20.0
+    base_height_reward_scale = -2.0
     non_foot_contact_reward_scale = -2.0
 
     # torque regularization (rubric wants tiny scale)
