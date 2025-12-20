@@ -139,6 +139,8 @@ class Rob6323Go2Env(DirectRLEnv):
         self.desired_contact_states = torch.zeros(
             self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False
         )
+        # base-height termination grace counter (avoids 1-frame false terminations)
+        self._base_height_violation_count = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
 
         self.extras = {"log": {}, "episode": {}}
 
@@ -397,29 +399,54 @@ class Rob6323Go2Env(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         base_z = self.robot.data.root_pos_w[:, 2]
+
+        # --- compute base height above "ground" ---
         if self._height_scanner is not None:
             ground_z = self._ground_z_max_under_base()
             base_h = base_z - ground_z
         else:
-            base_h = base_z
+            # fallback: terrain-relative (important for uneven terrain)
+            if hasattr(self, "_terrain") and hasattr(self._terrain, "env_origins"):
+                base_h = base_z - self._terrain.env_origins[:, 2]
+            else:
+                base_h = base_z
 
-        cstr_base_height_min = base_h < float(self.cfg.base_height_min)
+        # --- base-height termination with grace period ---
+        min_h = float(self.cfg.base_height_min)
+        violate_h = base_h < min_h
+
+        # require violation for N consecutive steps (~0.10s)
+        grace_s = float(getattr(self.cfg, "base_height_grace_s", 0.10))
+        grace_steps = max(1, int(grace_s / self.step_dt))
+
+        self._base_height_violation_count = torch.where(
+            violate_h,
+            torch.clamp(self._base_height_violation_count + 1, max=grace_steps),
+            torch.zeros_like(self._base_height_violation_count),
+        )
+        cstr_base_height_min = self._base_height_violation_count >= grace_steps
+
+        # --- timeout ---
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
+        # --- base contact termination (your existing code) ---
         net_contact_forces = self._contact_sensor.data.net_forces_w_history  # (N,H,B,3)
         base_id = int(self._base_id)
-
         base_force_mag_hist = torch.linalg.norm(net_contact_forces[:, :, base_id, :], dim=-1)  # (N,H)
         thr = float(getattr(self.cfg, "termination_base_contact_force", 25.0))
         cstr_termination_contacts = torch.any(base_force_mag_hist > thr, dim=1)
 
-
+        # --- upside-down termination ---
         cstr_upsidedown = self.robot.data.projected_gravity_b[:, 2] > 0
+
+        # --- bookkeeping + return ---
         self._term_base_contact = cstr_termination_contacts
         self._term_upside_down  = cstr_upsidedown
         self._term_base_height  = cstr_base_height_min
+
         died = cstr_termination_contacts | cstr_upsidedown | cstr_base_height_min
         return died, time_out
+
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -435,6 +462,8 @@ class Rob6323Go2Env(DirectRLEnv):
 
         self._actions[env_ids] = 0.0
         self._previous_actions[env_ids] = 0.0
+        self._base_height_violation_count[env_ids_t] = 0
+
 
         # Reset command timers + sample new target commands (smoothed commands start at 0)
         env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
