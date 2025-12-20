@@ -34,64 +34,39 @@ class Rob6323Go2EnvCfg(DirectRLEnvCfg):
     use_height_scanner = True
     height_scanner_num_points = 64     # we downsample the raw ray grid to a fixed size
     height_scan_clip = 1.0             # meters (clip observation)
-    observation_space = 48 + 4 + height_scanner_num_points
+    observation_space = 48 + 4 + (height_scanner_num_points if use_height_scanner else 0)
 
-    # Ray-cast height scanner (grid under/around the base, pointing down)
+    # termination threshold (avoid instant terminations from tiny contacts/noise)
+    termination_base_contact_force = 25.0
+
+    ## Ray-cast height scanner (casts a grid downwards and returns hit points)
     height_scanner: RayCasterCfg = RayCasterCfg(
         prim_path="/World/envs/env_.*/Robot/base",
         update_period=0.0,
+        mesh_prim_paths=["/World/ground"],  # one static mesh target (recommended)
         offset=RayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.5)),
-        attach_yaw_only=True,
-        ray_direction=(0.0, 0.0, -1.0),
-        ray_far=2.0,
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=(1.6, 1.0)),
-        mesh_prim_paths=["/World/ground"],
-        debug_vis=False,
+        ray_alignment="yaw",  # ignore roll/pitch for a “heightmap-like” scan
+        pattern_cfg=patterns.GridPatternCfg(
+            resolution=0.20,   # 0.20m grid spacing
+            size=(1.6, 1.0),   # (length, width) in meters around the base
+        ),
+        max_distance=2.0,
     )
 
-    # ---- uneven terrain generator ----
-    # NOTE: TerrainImporterCfg in generator mode needs a terrain_generator config. :contentReference[oaicite:6]{index=6}
     terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="generator",
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
-        debug_vis=False,
-        terrain_generator=TerrainGeneratorCfg(
-            seed=0,                 # set !=0 for deterministic terrain layouts
-            curriculum=True,
-            size=(4.0, 4.0),        # patch size (meters) ~ env_spacing
-            num_rows=32,            # 32*32 = 1024 patches => matches num_envs above
-            num_cols=32,
-            horizontal_scale=0.2,   # heightfield cell size (bigger = fewer cells)
-            vertical_scale=0.005,   # height quantization
-            slope_threshold=0.75,
-            sub_terrains={
-                # proportions should sum to 1.0
-                "random_uniform": hf_cfg.HfRandomUniformTerrainCfg(
-                    proportion=0.40, noise_range=(0.0, 0.05), noise_step=0.01
-                ),
-                "pyramid_sloped": hf_cfg.HfPyramidSlopedTerrainCfg(
-                    proportion=0.20, slope_range=(0.0, 0.35)
-                ),
-                "pyramid_stairs": hf_cfg.HfPyramidStairsTerrainCfg(
-                    proportion=0.20, step_height_range=(0.02, 0.10), step_width=0.30
-                ),
-                "discrete_obstacles": hf_cfg.HfDiscreteObstaclesTerrainCfg(
-                    proportion=0.20,
-                    obstacle_height_range=(0.02, 0.15),
-                    obstacle_width_range=(0.20, 0.60),
-                    num_obstacles=30,
-                ),
-            },
-        ),
-    )
+    prim_path="/World/ground",
+    terrain_type="generator",
+    terrain_generator=ROUGH_TERRAINS_CFG,
+    max_init_terrain_level=5,
+    collision_group=-1,
+    physics_material=sim_utils.RigidBodyMaterialCfg(
+        friction_combine_mode="multiply",
+        restitution_combine_mode="multiply",
+        static_friction=1.0,
+        dynamic_friction=1.0,
+        restitution=0.0,
+    ),
+)
 
     # (optional but recommended on rough terrain)
-    base_height_min = 0.18  # now interpreted as "height above ground" (we’ll implement that below)
+    bbase_height_min = 0.25  # now interpreted as "height above ground" (we’ll implement that below)
