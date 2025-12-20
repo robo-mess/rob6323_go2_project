@@ -47,17 +47,11 @@ class Rob6323Go2Env(DirectRLEnv):
                 "rew_action_rate",
                 "raibert_heuristic",
                 # Part 5
-                "orient",
-                "lin_vel_z",
-                "dof_vel",
-                "ang_vel_xy",
+                "orient", "lin_vel_z", "dof_vel", "ang_vel_xy",
                 # Part 6
-                "feet_clearance",
-                "tracking_contacts_shaped_force",
+                "feet_clearance", "tracking_contacts_shaped_force",
                 # rubric extras
-                "base_height",
-                "non_foot_contact",
-                "torque",
+                "base_height", "non_foot_contact", "torque",
             ]
         }
 
@@ -136,7 +130,7 @@ class Rob6323Go2Env(DirectRLEnv):
         """Return (num_envs, HEIGHT_SCAN_DIM) terrain height samples around the robot.
 
         Uses RayCaster hit points (ray_hits_w) relative to the robot base height.
-        Enforces a fixed output dimension to prevent PPO observation-shape crashes.
+        Safe on episode start (returns zeros) and enforces fixed dimension to avoid PPO shape crashes.
         """
         exp_dim = int(getattr(self.cfg, "HEIGHT_SCAN_DIM", 0))
         if exp_dim <= 0:
@@ -148,13 +142,23 @@ class Rob6323Go2Env(DirectRLEnv):
         data = self._height_scanner.data
         hits = getattr(data, "ray_hits_w", None)
 
-        # If hits aren't ready yet, return zeros (safe at episode start)
+        # fallback if your IsaacLab build exposes distances instead of hit-points
         if hits is None or hits.numel() == 0:
-            return torch.zeros((self.num_envs, exp_dim), device=self.device)
+            dist = getattr(data, "ray_distances", None)
+            if dist is None or dist.numel() == 0:
+                return torch.zeros((self.num_envs, exp_dim), device=self.device)
+            dist = torch.nan_to_num(dist, nan=0.0, posinf=0.0, neginf=0.0).reshape(self.num_envs, -1)
+            dist = torch.clamp(dist, 0.0, 2.0)
+            if dist.shape[1] != exp_dim:
+                if dist.shape[1] > exp_dim:
+                    dist = dist[:, :exp_dim]
+                else:
+                    pad = torch.zeros((self.num_envs, exp_dim - dist.shape[1]), device=self.device)
+                    dist = torch.cat([dist, pad], dim=1)
+            return dist
 
-        # Normalize hit tensor to (E, R, 3)
+        # normalize hits to (E, R, 3)
         if hits.ndim == 4:
-            # common shapes: (E,1,R,3) or (1,E,R,3)
             if hits.shape[0] == self.num_envs:
                 hits = hits[:, 0]
             elif hits.shape[1] == self.num_envs:
@@ -167,11 +171,10 @@ class Rob6323Go2Env(DirectRLEnv):
         else:
             hits = hits.reshape(self.num_envs, -1, 3)
 
-        z_hits = hits[..., 2]  # (E,R)
-        base_z = self.robot.data.root_pos_w[:, 2:3]  # (E,1)
-        heights = base_z - z_hits  # positive if ground is below base
+        z_hits = hits[..., 2]
+        base_z = self.robot.data.root_pos_w[:, 2:3]
+        heights = base_z - z_hits
 
-        # Optional validity mask
         valid = getattr(data, "ray_valid", None)
         if valid is not None and valid.numel() == heights.numel():
             valid = valid.reshape_as(heights)
@@ -180,7 +183,6 @@ class Rob6323Go2Env(DirectRLEnv):
         heights = torch.nan_to_num(heights, nan=0.0, posinf=0.0, neginf=0.0)
         heights = torch.clamp(heights, -1.0, 1.0).reshape(self.num_envs, -1)
 
-        # Enforce fixed dimension
         if heights.shape[1] != exp_dim:
             if heights.shape[1] > exp_dim:
                 heights = heights[:, :exp_dim]
@@ -193,7 +195,6 @@ class Rob6323Go2Env(DirectRLEnv):
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self._contact_sensor = ContactSensor(self.cfg.contact_sensor)
-
         # Height scanner (RayCaster) for uneven terrain perception
         self._height_scanner = RayCaster(self.cfg.height_scanner)
 
@@ -217,47 +218,41 @@ class Rob6323Go2Env(DirectRLEnv):
     # ---------------------------
 
     def _resample_commands(self, env_ids: torch.Tensor):
-        num = env_ids.numel()
+        n = int(env_ids.numel())
+
         self._commands_target[env_ids, 0] = sample_uniform(
-            self.cfg.command_range_vx[0], self.cfg.command_range_vx[1], (num,), device=self.device
+            self.cfg.command_range_vx[0], self.cfg.command_range_vx[1], (n,), self.device
         )
         self._commands_target[env_ids, 1] = sample_uniform(
-            self.cfg.command_range_vy[0], self.cfg.command_range_vy[1], (num,), device=self.device
+            self.cfg.command_range_vy[0], self.cfg.command_range_vy[1], (n,), self.device
         )
         self._commands_target[env_ids, 2] = sample_uniform(
-            self.cfg.command_range_yaw[0], self.cfg.command_range_yaw[1], (num,), device=self.device
+            self.cfg.command_range_yaw[0], self.cfg.command_range_yaw[1], (n,), self.device
         )
 
     def _update_commands(self):
-        # resample target commands every T seconds
         self._command_time += self.step_dt
-        resample_mask = self._command_time > self.cfg.command_resample_time_s
+        resample_mask = self._command_time > float(self.cfg.command_resample_time_s)
         if torch.any(resample_mask):
-            env_ids = resample_mask.nonzero(as_tuple=False).flatten()
+            env_ids = torch.nonzero(resample_mask).squeeze(-1)
             self._command_time[env_ids] = 0.0
             self._resample_commands(env_ids)
 
-        # low-pass filter to make commands change slowly
-        tau = self.cfg.command_smoothing_tau_s
+        tau = float(self.cfg.command_smoothing_tau_s)
         if tau <= 0.0:
             self._commands[:] = self._commands_target
         else:
             alpha = 1.0 - torch.exp(torch.tensor(-self.step_dt / tau, device=self.device))
             self._commands += alpha * (self._commands_target - self._commands)
 
-    def _pre_physics_step(self, actions: torch.Tensor):
-        self._actions = actions.clone()
-        # Update commands with smoothing
+    def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self._update_commands()
-
-        # Compute PD joint targets
+        self._actions = actions.clone()
         self.desired_joint_pos = self.cfg.action_scale * self._actions + self.robot.data.default_joint_pos
 
-    def _apply_action(self):
-        # PD control in torque space (your original behavior)
+    def _apply_action(self) -> None:
         torques = self.Kp * (self.desired_joint_pos - self.robot.data.joint_pos) - self.Kd * self.robot.data.joint_vel
         torques = torch.clip(torques, -self.torque_limits, self.torque_limits)
-
         self._last_torques = torques
         self.robot.set_joint_effort_target(torques)
 
@@ -307,7 +302,7 @@ class Rob6323Go2Env(DirectRLEnv):
         rew_raibert_heuristic = self._reward_raibert_heuristic()
 
         # Part 5 shaping
-        upright = torch.square(1.0 - self.robot.data.projected_gravity_b[:, 2])
+        upright = torch.square(1.0 + self.robot.data.projected_gravity_b[:, 2])
         lin_vel_z = torch.square(self.robot.data.root_lin_vel_b[:, 2])
         dof_vel = torch.sum(torch.square(self.robot.data.joint_vel), dim=1)
         ang_vel_xy = torch.sum(torch.square(self.robot.data.root_ang_vel_b[:, :2]), dim=1)
@@ -317,7 +312,13 @@ class Rob6323Go2Env(DirectRLEnv):
         tracking_contacts_force = self._reward_tracking_contacts_shaped_force()
 
         # rubric extras
-        base_height = torch.square(self.robot.data.root_pos_w[:, 2] - self.cfg.base_height_target_m)
+        # Base height penalty (rough-terrain friendly):
+        # penalize clearance error relative to the local terrain under/near the base
+        # using the height scanner rays (take the highest hit in the scan window).
+        hits_z = self.height_scanner.data.ray_hits_w[..., 2]  # (N, R)
+        local_ground_z = torch.max(hits_z, dim=1).values
+        desired_base_z = local_ground_z + self.cfg.base_height_target_m
+        base_height = torch.square(self.robot.data.root_pos_w[:, 2] - desired_base_z)
         non_foot_contact = self._reward_non_foot_contact()
         torque = torch.sum(torch.square(self._last_torques), dim=1)
 
@@ -490,4 +491,4 @@ class Rob6323Go2Env(DirectRLEnv):
         forces = self._contact_sensor.data.net_forces_w[:, self._undesired_contact_ids_sensor, :]
         bad_mag = torch.linalg.norm(forces, dim=-1).sum(dim=1)
         bad = torch.tanh(bad_mag)
-        return self.cfg.non_foot_contact_reward_scale * bad
+        return bad
